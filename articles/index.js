@@ -14,47 +14,50 @@ module.exports = async function (context, req) {
   const pageSize = Math.min(200, Math.max(1, parseInt(req.query.pageSize) || 50));
   const search = (req.query.search || '').trim();
   const sort = req.query.sort || 'pertinance';
+  const order = (req.query.order || 'desc').toLowerCase() === 'asc' ? 'ASC' : 'DESC';
   const offset = (page - 1) * pageSize;
 
-  // Récupération des filtres
   const f = {
     fournisseurs: parseList(req.query.fournisseurs),
     marques: parseList(req.query.marques),
     licences: parseList(req.query.licences),
-    actif: req.query.actif, // '1' ou '0' ou undefined
+    actif: req.query.actif,
     statuts: parseList(req.query.statuts),
     cat_trad: parseList(req.query.cat_trad),
     sous_cat_trad: parseList(req.query.sous_cat_trad),
     cat_web: parseList(req.query.cat_web),
     sous_cat_web: parseList(req.query.sous_cat_web),
     acheteurs: parseList(req.query.acheteurs),
-    stock1_op: req.query.stock1_op,
-    stock1_val: req.query.stock1_val,
-    stock2_op: req.query.stock2_op,
-    stock2_val: req.query.stock2_val,
-    stock3_op: req.query.stock3_op,
-    stock3_val: req.query.stock3_val,
+    stock1_op: req.query.stock1_op, stock1_val: req.query.stock1_val,
+    stock2_op: req.query.stock2_op, stock2_val: req.query.stock2_val,
+    stock3_op: req.query.stock3_op, stock3_val: req.query.stock3_val,
   };
 
-  // Tri
-  let orderByFicart, orderByView;
-  if (sort === 'ref') {
-    orderByFicart = 'FA_CODE ASC';
-    orderByView = 'REF_JACTAL ASC';
-  } else {
-    orderByFicart = 'FA_PERTINANCE DESC, FA_CODE ASC';
-    orderByView = 'PERTINANCE DESC, REF_JACTAL ASC';
-  }
+  // Mapping des colonnes de tri : sort -> { ficart: "FA_XXX", view: "YYY" }
+  const SORT_MAP = {
+    'ref':         { ficart: 'FA_CODE',        view: 'REF_JACTAL' },
+    'libelle':     { ficart: 'FA_LIB',         view: 'LIBELLE_STANDART' },
+    'fournisseur': { ficart: null,             view: 'NOM_FOURNISSEUR' }, // FA_FRS est un ID, pas un nom
+    'stock1':      { ficart: 'FA_STO1',        view: 'STOCK1' },
+    'stock2':      { ficart: 'FA_STO2',        view: 'STOCK2' },
+    'stock3':      { ficart: 'FA_STO3',        view: 'STOCK3' },
+    'pertinance':  { ficart: 'FA_PERTINANCE',  view: 'PERTINANCE' },
+  };
+  const sortDef = SORT_MAP[sort] || SORT_MAP['pertinance'];
 
-  // Détection : a-t-on besoin de la VIEW ?
+  let orderByFicart, orderByView;
+  if (sortDef.ficart) {
+    orderByFicart = `${sortDef.ficart} ${order}, FA_CODE ASC`;
+  } else {
+    orderByFicart = null; // forcera le chemin VIEW
+  }
+  orderByView = `${sortDef.view} ${order}, REF_JACTAL ASC`;
+
   const needsView = !!(search 
-    || f.fournisseurs.length 
-    || f.marques.length 
-    || f.licences.length 
-    || f.cat_trad.length 
-    || f.sous_cat_trad.length 
-    || f.cat_web.length 
-    || f.sous_cat_web.length
+    || f.fournisseurs.length || f.marques.length || f.licences.length 
+    || f.cat_trad.length || f.sous_cat_trad.length 
+    || f.cat_web.length || f.sous_cat_web.length
+    || !orderByFicart  // tri qui nécessite la VIEW (ex: fournisseur)
   );
 
   let connection;
@@ -71,7 +74,6 @@ module.exports = async function (context, req) {
     let refsToFetch;
 
     if (needsView) {
-      // Cas lent : au moins un filtre sur la VIEW, on passe par la VIEW
       const { where, params } = buildViewWhere(search, f);
 
       const [countResult] = await connection.execute(
@@ -87,7 +89,6 @@ module.exports = async function (context, req) {
       );
       refsToFetch = refResult.map(r => r.REF_JACTAL);
     } else {
-      // Cas rapide : que des filtres FICART, on reste sur FICART direct
       const { where, params } = buildFicartWhere(f);
 
       const [countResult] = await connection.execute(
@@ -109,17 +110,13 @@ module.exports = async function (context, req) {
         status: 200,
         headers: { 'Content-Type': 'application/json' },
         body: {
-          articles: [],
-          total: total,
-          page: page,
-          pageSize: pageSize,
+          articles: [], total, page, pageSize,
           totalPages: Math.ceil(total / pageSize)
         }
       };
       return;
     }
 
-    // Charger les détails des refs trouvés via la VIEW
     const placeholders = refsToFetch.map(() => '?').join(',');
     const [rows] = await connection.execute(
       `SELECT REF_JACTAL, LIBELLE_STANDART, NOM_FOURNISSEUR, 
@@ -136,24 +133,17 @@ module.exports = async function (context, req) {
       headers: { 'Content-Type': 'application/json' },
       body: {
         articles: rows,
-        total: total,
-        page: page,
-        pageSize: pageSize,
+        total, page, pageSize,
         totalPages: Math.ceil(total / pageSize),
-        sort: sort
+        sort, order: order.toLowerCase()
       }
     };
   } catch (err) {
-    context.res = {
-      status: 500,
-      body: { error: err.message }
-    };
+    context.res = { status: 500, body: { error: err.message } };
   } finally {
     if (connection) await connection.end();
   }
 };
-
-// --- Helpers ---
 
 function parseList(str) {
   if (!str) return [];
@@ -170,58 +160,34 @@ function buildViewWhere(search, f) {
     for (let i = 0; i < 13; i++) params.push(pattern);
   }
 
-  addInCondition(conditions, params, 'NOM_FOURNISSEUR', f.fournisseurs);
-  addInCondition(conditions, params, 'MARQUE_NOM', f.marques);
-  addInCondition(conditions, params, 'LICENCE_NOM', f.licences);
-  addInCondition(conditions, params, 'TRAD_GROUPE_NOM', f.cat_trad);
-  addInCondition(conditions, params, 'TRAD_SOUS_GROUPE_NOM', f.sous_cat_trad);
-  addInCondition(conditions, params, 'WEB_GROUPE1_NOM', f.cat_web);
-  addInCondition(conditions, params, 'WEB_SOUS_GROUPE1_NOM', f.sous_cat_web);
-  addInCondition(conditions, params, 'NOM_ACHETEUR', f.acheteurs);
-  addInCondition(conditions, params, 'STATUT', f.statuts);
+  addIn(conditions, params, 'NOM_FOURNISSEUR', f.fournisseurs);
+  addIn(conditions, params, 'MARQUE_NOM', f.marques);
+  addIn(conditions, params, 'LICENCE_NOM', f.licences);
+  addIn(conditions, params, 'TRAD_GROUPE_NOM', f.cat_trad);
+  addIn(conditions, params, 'TRAD_SOUS_GROUPE_NOM', f.sous_cat_trad);
+  addIn(conditions, params, 'WEB_GROUPE1_NOM', f.cat_web);
+  addIn(conditions, params, 'WEB_SOUS_GROUPE1_NOM', f.sous_cat_web);
+  addIn(conditions, params, 'NOM_ACHETEUR', f.acheteurs);
+  addIn(conditions, params, 'STATUT', f.statuts);
 
   if (f.actif === '1') conditions.push(`ACTUEL = 1`);
   else if (f.actif === '0') conditions.push(`(ACTUEL = 0 OR ACTUEL IS NULL)`);
 
-  addStockCondition(conditions, params, 'STOCK1', f.stock1_op, f.stock1_val);
-  addStockCondition(conditions, params, 'STOCK2', f.stock2_op, f.stock2_val);
-  addStockCondition(conditions, params, 'STOCK3', f.stock3_op, f.stock3_val);
+  addStock(conditions, params, 'STOCK1', f.stock1_op, f.stock1_val);
+  addStock(conditions, params, 'STOCK2', f.stock2_op, f.stock2_val);
+  addStock(conditions, params, 'STOCK3', f.stock3_op, f.stock3_val);
 
-  const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
-  return { where, params };
+  return { where: conditions.length ? `WHERE ${conditions.join(' AND ')}` : '', params };
 }
 
 function buildFicartWhere(f) {
   const conditions = [];
   const params = [];
 
-  addInCondition(conditions, params, 'FA_ACHNOM', f.acheteurs);
-  addInCondition(conditions, params, 'FA_STA', f.statuts);
+  addIn(conditions, params, 'FA_ACHNOM', f.acheteurs);
+  addIn(conditions, params, 'FA_STA', f.statuts);
 
   if (f.actif === '1') conditions.push(`FA_ACT = 1`);
   else if (f.actif === '0') conditions.push(`(FA_ACT = 0 OR FA_ACT IS NULL)`);
 
-  addStockCondition(conditions, params, 'FA_STO1', f.stock1_op, f.stock1_val);
-  addStockCondition(conditions, params, 'FA_STO2', f.stock2_op, f.stock2_val);
-  addStockCondition(conditions, params, 'FA_STO3', f.stock3_op, f.stock3_val);
-
-  const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
-  return { where, params };
-}
-
-function addInCondition(conditions, params, column, values) {
-  if (!values || !values.length) return;
-  const placeholders = values.map(() => '?').join(',');
-  conditions.push(`${column} IN (${placeholders})`);
-  values.forEach(v => params.push(v));
-}
-
-function addStockCondition(conditions, params, column, op, val) {
-  if (!op || val === undefined || val === '') return;
-  const allowedOps = ['>', '>=', '<', '<=', '=', '!='];
-  if (!allowedOps.includes(op)) return;
-  const numVal = parseFloat(val);
-  if (isNaN(numVal)) return;
-  conditions.push(`${column} ${op} ?`);
-  params.push(numVal);
-}
+  addStock(conditions, params, 'FA_STO1', f.stoc
