@@ -11,6 +11,12 @@ module.exports = async function (context, req) {
     return;
   }
 
+  // Lecture et validation des query params
+  const page = Math.max(1, parseInt(req.query.page) || 1);
+  const pageSize = Math.min(200, Math.max(1, parseInt(req.query.pageSize) || 50));
+  const search = (req.query.search || '').trim();
+  const offset = (page - 1) * pageSize;
+
   let connection;
   try {
     connection = await mysql.createConnection({
@@ -21,14 +27,50 @@ module.exports = async function (context, req) {
       database: process.env.MYSQL_DATABASE
     });
 
+    // Construction du WHERE si recherche
+    let whereClause = '';
+    const params = [];
+    if (search) {
+      whereClause = `WHERE 
+        REF_JACTAL LIKE ? 
+        OR NOM_FOURNISSEUR LIKE ? 
+        OR EAN_JACTAL LIKE ? 
+        OR EAN_USINE LIKE ? 
+        OR LIBELLE_STANDART LIKE ? 
+        OR LIBELLE_WEB LIKE ? 
+        OR DESCRIPTIF_WEB LIKE ?`;
+      const searchPattern = `%${search}%`;
+      for (let i = 0; i < 7; i++) params.push(searchPattern);
+    }
+
+    // 1) Compte total
+    const [countResult] = await connection.execute(
+      `SELECT COUNT(*) as total FROM V_ARTICLES_CATALOGUE ${whereClause}`,
+      params
+    );
+    const total = countResult[0].total;
+
+    // 2) Données paginées
     const [rows] = await connection.execute(
-      'SELECT REF_JACTAL, LIBELLE_STANDART, NOM_FOURNISSEUR, MARQUE_NOM, STOCK1, STOCK2, STOCK3 FROM V_ARTICLES_CATALOGUE LIMIT 100'
+      `SELECT REF_JACTAL, LIBELLE_STANDART, NOM_FOURNISSEUR, MARQUE_NOM, 
+              STOCK1, STOCK2, STOCK3 
+       FROM V_ARTICLES_CATALOGUE 
+       ${whereClause}
+       ORDER BY REF_JACTAL
+       LIMIT ${pageSize} OFFSET ${offset}`,
+      params
     );
 
     context.res = {
       status: 200,
       headers: { 'Content-Type': 'application/json' },
-      body: rows
+      body: {
+        articles: rows,
+        total: total,
+        page: page,
+        pageSize: pageSize,
+        totalPages: Math.ceil(total / pageSize)
+      }
     };
   } catch (err) {
     context.res = {
