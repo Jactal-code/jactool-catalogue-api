@@ -1,4 +1,4 @@
-module.exports = async function (context, req) {
+module.exports = async function (context, req) {      // Force redeploy v2
   const clientPrincipal = req.headers['x-ms-client-principal'];
   if (!clientPrincipal) {
     context.res = { status: 401, body: { error: 'Unauthorized' } };
