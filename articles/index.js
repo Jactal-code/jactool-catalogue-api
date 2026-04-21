@@ -1,7 +1,6 @@
 const mysql = require('mysql2/promise');
 
 module.exports = async function (context, req) {
-  // Sécurité : n'accepter que les appels venant de la SWA
   const clientPrincipal = req.headers['x-ms-client-principal'];
   if (!clientPrincipal) {
     context.res = {
@@ -11,7 +10,6 @@ module.exports = async function (context, req) {
     return;
   }
 
-  // Lecture et validation des query params
   const page = Math.max(1, parseInt(req.query.page) || 1);
   const pageSize = Math.min(200, Math.max(1, parseInt(req.query.pageSize) || 50));
   const search = (req.query.search || '').trim();
@@ -27,7 +25,6 @@ module.exports = async function (context, req) {
       database: process.env.MYSQL_DATABASE
     });
 
-    // Construction du WHERE si recherche
     let whereClause = '';
     const params = [];
     if (search) {
@@ -38,21 +35,26 @@ module.exports = async function (context, req) {
         OR EAN_USINE LIKE ? 
         OR LIBELLE_STANDART LIKE ? 
         OR LIBELLE_WEB LIKE ? 
-        OR DESCRIPTIF_WEB LIKE ?`;
+        OR DESCRIPTIF_WEB LIKE ?
+        OR LICENCE_NOM LIKE ?
+        OR MARQUE_NOM LIKE ?
+        OR TRAD_GROUPE_NOM LIKE ?
+        OR TRAD_SOUS_GROUPE_NOM LIKE ?
+        OR WEB_GROUPE1_NOM LIKE ?
+        OR WEB_SOUS_GROUPE1_NOM LIKE ?`;
       const searchPattern = `%${search}%`;
-      for (let i = 0; i < 7; i++) params.push(searchPattern);
+      for (let i = 0; i < 13; i++) params.push(searchPattern);
     }
 
-    // 1) Compte total
     const [countResult] = await connection.execute(
       `SELECT COUNT(*) as total FROM V_ARTICLES_CATALOGUE ${whereClause}`,
       params
     );
     const total = countResult[0].total;
 
-    // 2) Données paginées
     const [rows] = await connection.execute(
-      `SELECT REF_JACTAL, LIBELLE_STANDART, NOM_FOURNISSEUR, MARQUE_NOM, 
+      `SELECT REF_JACTAL, LIBELLE_STANDART, NOM_FOURNISSEUR, 
+              URL_PHOTO1, PERTINANCE,
               STOCK1, STOCK2, STOCK3 
        FROM V_ARTICLES_CATALOGUE 
        ${whereClause}
