@@ -1,7 +1,12 @@
 module.exports = async function (context, req) {
+  const clientPrincipal = req.headers['x-ms-client-principal'];
+  if (!clientPrincipal) {
+    context.res = { status: 401, body: { error: 'Unauthorized' } };
+    return;
+  }
+
   const results = {};
   
-  // Test 1: ipify
   try {
     const r1 = await fetch('https://api.ipify.org?format=json');
     const d1 = await r1.json();
@@ -10,7 +15,6 @@ module.exports = async function (context, req) {
     results.ipify_error = e.message;
   }
   
-  // Test 2: icanhazip
   try {
     const r2 = await fetch('https://icanhazip.com');
     const txt = await r2.text();
@@ -19,7 +23,6 @@ module.exports = async function (context, req) {
     results.icanhazip_error = e.message;
   }
   
-  // Test 3: ifconfig.me
   try {
     const r3 = await fetch('https://ifconfig.me/ip');
     const txt = await r3.text();
