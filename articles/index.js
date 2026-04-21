@@ -13,7 +13,18 @@ module.exports = async function (context, req) {
   const page = Math.max(1, parseInt(req.query.page) || 1);
   const pageSize = Math.min(200, Math.max(1, parseInt(req.query.pageSize) || 50));
   const search = (req.query.search || '').trim();
+  const sort = req.query.sort || 'pertinance'; // 'pertinance' (défaut) ou 'ref'
   const offset = (page - 1) * pageSize;
+
+  // Définir la colonne de tri
+  let orderByFicart, orderByView;
+  if (sort === 'ref') {
+    orderByFicart = 'FA_CODE ASC';
+    orderByView = 'REF_JACTAL ASC';
+  } else {
+    orderByFicart = 'FA_PERTINANCE DESC, FA_CODE ASC';
+    orderByView = 'PERTINANCE DESC, REF_JACTAL ASC';
+  }
 
   let connection;
   try {
@@ -29,7 +40,6 @@ module.exports = async function (context, req) {
     let refsToFetch;
 
     if (search) {
-      // RECHERCHE : on doit passer par la VIEW car on cherche dans plusieurs tables jointes
       const whereClause = `WHERE 
         REF_JACTAL LIKE ? 
         OR NOM_FOURNISSEUR LIKE ? 
@@ -56,12 +66,11 @@ module.exports = async function (context, req) {
 
       const [refResult] = await connection.execute(
         `SELECT REF_JACTAL FROM V_ARTICLES_CATALOGUE ${whereClause} 
-         ORDER BY REF_JACTAL LIMIT ${pageSize} OFFSET ${offset}`,
+         ORDER BY ${orderByView} LIMIT ${pageSize} OFFSET ${offset}`,
         params
       );
       refsToFetch = refResult.map(r => r.REF_JACTAL);
     } else {
-      // PAS DE RECHERCHE : on fait le tri DIRECTEMENT sur FICART qui a l'index
       const [countResult] = await connection.execute(
         `SELECT COUNT(*) as total FROM FICART`
       );
@@ -69,12 +78,11 @@ module.exports = async function (context, req) {
 
       const [refResult] = await connection.execute(
         `SELECT FA_CODE as REF_JACTAL FROM FICART 
-         ORDER BY FA_CODE LIMIT ${pageSize} OFFSET ${offset}`
+         ORDER BY ${orderByFicart} LIMIT ${pageSize} OFFSET ${offset}`
       );
       refsToFetch = refResult.map(r => r.REF_JACTAL);
     }
 
-    // Si aucun résultat, renvoyer vide
     if (refsToFetch.length === 0) {
       context.res = {
         status: 200,
@@ -90,16 +98,17 @@ module.exports = async function (context, req) {
       return;
     }
 
-    // Maintenant on charge uniquement les détails de ces refs (50 max)
+    // Important : on garde l'ordre de refsToFetch via FIELD() car WHERE IN ne préserve pas l'ordre
     const placeholders = refsToFetch.map(() => '?').join(',');
+    const orderFieldPlaceholders = refsToFetch.map(() => '?').join(',');
     const [rows] = await connection.execute(
       `SELECT REF_JACTAL, LIBELLE_STANDART, NOM_FOURNISSEUR, 
               URL_PHOTO1, PERTINANCE,
               STOCK1, STOCK2, STOCK3 
        FROM V_ARTICLES_CATALOGUE 
        WHERE REF_JACTAL IN (${placeholders})
-       ORDER BY REF_JACTAL`,
-      refsToFetch
+       ORDER BY FIELD(REF_JACTAL, ${orderFieldPlaceholders})`,
+      [...refsToFetch, ...refsToFetch]
     );
 
     context.res = {
@@ -110,7 +119,8 @@ module.exports = async function (context, req) {
         total: total,
         page: page,
         pageSize: pageSize,
-        totalPages: Math.ceil(total / pageSize)
+        totalPages: Math.ceil(total / pageSize),
+        sort: sort
       }
     };
   } catch (err) {
