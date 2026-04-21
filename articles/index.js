@@ -1,6 +1,16 @@
 const mysql = require('mysql2/promise');
 
 module.exports = async function (context, req) {
+  // Sécurité : n'accepter que les appels venant de la SWA
+  const clientPrincipal = req.headers['x-ms-client-principal'];
+  if (!clientPrincipal) {
+    context.res = {
+      status: 401,
+      body: { error: 'Unauthorized - this API can only be called via the SWA' }
+    };
+    return;
+  }
+
   let connection;
   try {
     connection = await mysql.createConnection({
