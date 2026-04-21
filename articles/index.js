@@ -25,10 +25,12 @@ module.exports = async function (context, req) {
       database: process.env.MYSQL_DATABASE
     });
 
-    let whereClause = '';
-    const params = [];
+    let total;
+    let refsToFetch;
+
     if (search) {
-      whereClause = `WHERE 
+      // RECHERCHE : on doit passer par la VIEW car on cherche dans plusieurs tables jointes
+      const whereClause = `WHERE 
         REF_JACTAL LIKE ? 
         OR NOM_FOURNISSEUR LIKE ? 
         OR EAN_JACTAL LIKE ? 
@@ -43,24 +45,61 @@ module.exports = async function (context, req) {
         OR WEB_GROUPE1_NOM LIKE ?
         OR WEB_SOUS_GROUPE1_NOM LIKE ?`;
       const searchPattern = `%${search}%`;
+      const params = [];
       for (let i = 0; i < 13; i++) params.push(searchPattern);
+
+      const [countResult] = await connection.execute(
+        `SELECT COUNT(*) as total FROM V_ARTICLES_CATALOGUE ${whereClause}`,
+        params
+      );
+      total = countResult[0].total;
+
+      const [refResult] = await connection.execute(
+        `SELECT REF_JACTAL FROM V_ARTICLES_CATALOGUE ${whereClause} 
+         ORDER BY REF_JACTAL LIMIT ${pageSize} OFFSET ${offset}`,
+        params
+      );
+      refsToFetch = refResult.map(r => r.REF_JACTAL);
+    } else {
+      // PAS DE RECHERCHE : on fait le tri DIRECTEMENT sur FICART qui a l'index
+      const [countResult] = await connection.execute(
+        `SELECT COUNT(*) as total FROM FICART`
+      );
+      total = countResult[0].total;
+
+      const [refResult] = await connection.execute(
+        `SELECT FA_CODE as REF_JACTAL FROM FICART 
+         ORDER BY FA_CODE LIMIT ${pageSize} OFFSET ${offset}`
+      );
+      refsToFetch = refResult.map(r => r.REF_JACTAL);
     }
 
-    const [countResult] = await connection.execute(
-      `SELECT COUNT(*) as total FROM V_ARTICLES_CATALOGUE ${whereClause}`,
-      params
-    );
-    const total = countResult[0].total;
+    // Si aucun résultat, renvoyer vide
+    if (refsToFetch.length === 0) {
+      context.res = {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+        body: {
+          articles: [],
+          total: total,
+          page: page,
+          pageSize: pageSize,
+          totalPages: Math.ceil(total / pageSize)
+        }
+      };
+      return;
+    }
 
+    // Maintenant on charge uniquement les détails de ces refs (50 max)
+    const placeholders = refsToFetch.map(() => '?').join(',');
     const [rows] = await connection.execute(
       `SELECT REF_JACTAL, LIBELLE_STANDART, NOM_FOURNISSEUR, 
               URL_PHOTO1, PERTINANCE,
               STOCK1, STOCK2, STOCK3 
        FROM V_ARTICLES_CATALOGUE 
-       ${whereClause}
-       ORDER BY REF_JACTAL
-       LIMIT ${pageSize} OFFSET ${offset}`,
-      params
+       WHERE REF_JACTAL IN (${placeholders})
+       ORDER BY REF_JACTAL`,
+      refsToFetch
     );
 
     context.res = {
