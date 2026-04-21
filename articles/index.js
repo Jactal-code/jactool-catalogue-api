@@ -33,11 +33,11 @@ module.exports = async function (context, req) {
     stock3_op: req.query.stock3_op, stock3_val: req.query.stock3_val,
   };
 
-  // Mapping des colonnes de tri : sort -> { ficart: "FA_XXX", view: "YYY" }
+  // Mapping des colonnes de tri
   const SORT_MAP = {
     'ref':         { ficart: 'FA_CODE',        view: 'REF_JACTAL' },
     'libelle':     { ficart: 'FA_LIB',         view: 'LIBELLE_STANDART' },
-    'fournisseur': { ficart: null,             view: 'NOM_FOURNISSEUR' }, // FA_FRS est un ID, pas un nom
+    'fournisseur': { ficart: null,             view: 'NOM_FOURNISSEUR' },
     'stock1':      { ficart: 'FA_STO1',        view: 'STOCK1' },
     'stock2':      { ficart: 'FA_STO2',        view: 'STOCK2' },
     'stock3':      { ficart: 'FA_STO3',        view: 'STOCK3' },
@@ -45,19 +45,17 @@ module.exports = async function (context, req) {
   };
   const sortDef = SORT_MAP[sort] || SORT_MAP['pertinance'];
 
-  let orderByFicart, orderByView;
+  let orderByFicart = null;
   if (sortDef.ficart) {
     orderByFicart = `${sortDef.ficart} ${order}, FA_CODE ASC`;
-  } else {
-    orderByFicart = null; // forcera le chemin VIEW
   }
-  orderByView = `${sortDef.view} ${order}, REF_JACTAL ASC`;
+  const orderByView = `${sortDef.view} ${order}, REF_JACTAL ASC`;
 
   const needsView = !!(search 
     || f.fournisseurs.length || f.marques.length || f.licences.length 
     || f.cat_trad.length || f.sous_cat_trad.length 
     || f.cat_web.length || f.sous_cat_web.length
-    || !orderByFicart  // tri qui nécessite la VIEW (ex: fournisseur)
+    || !orderByFicart
   );
 
   let connection;
@@ -117,15 +115,18 @@ module.exports = async function (context, req) {
       return;
     }
 
+    // Requête finale : on utilise query() au lieu de execute() pour FIELD()
+    // et on échappe manuellement les refs pour FIELD() via mysql.escape()
     const placeholders = refsToFetch.map(() => '?').join(',');
-    const [rows] = await connection.execute(
+    const escapedRefs = refsToFetch.map(r => mysql.escape(r)).join(',');
+    const [rows] = await connection.query(
       `SELECT REF_JACTAL, LIBELLE_STANDART, NOM_FOURNISSEUR, 
               URL_PHOTO1, PERTINANCE,
               STOCK1, STOCK2, STOCK3 
        FROM V_ARTICLES_CATALOGUE 
        WHERE REF_JACTAL IN (${placeholders})
-       ORDER BY FIELD(REF_JACTAL, ${placeholders})`,
-      [...refsToFetch, ...refsToFetch]
+       ORDER BY FIELD(REF_JACTAL, ${escapedRefs})`,
+      refsToFetch
     );
 
     context.res = {
@@ -139,6 +140,7 @@ module.exports = async function (context, req) {
       }
     };
   } catch (err) {
+    context.log.error('Error in /api/articles:', err);
     context.res = { status: 500, body: { error: err.message } };
   } finally {
     if (connection) await connection.end();
@@ -190,4 +192,26 @@ function buildFicartWhere(f) {
   if (f.actif === '1') conditions.push(`FA_ACT = 1`);
   else if (f.actif === '0') conditions.push(`(FA_ACT = 0 OR FA_ACT IS NULL)`);
 
-  addStock(conditions, params, 'FA_STO1', f.stoc
+  addStock(conditions, params, 'FA_STO1', f.stock1_op, f.stock1_val);
+  addStock(conditions, params, 'FA_STO2', f.stock2_op, f.stock2_val);
+  addStock(conditions, params, 'FA_STO3', f.stock3_op, f.stock3_val);
+
+  return { where: conditions.length ? `WHERE ${conditions.join(' AND ')}` : '', params };
+}
+
+function addIn(conditions, params, col, values) {
+  if (!values || !values.length) return;
+  const placeholders = values.map(() => '?').join(',');
+  conditions.push(`${col} IN (${placeholders})`);
+  values.forEach(v => params.push(v));
+}
+
+function addStock(conditions, params, col, op, val) {
+  if (!op || val === undefined || val === '') return;
+  const allowedOps = ['>', '>=', '<', '<=', '=', '!='];
+  if (!allowedOps.includes(op)) return;
+  const numVal = parseFloat(val);
+  if (isNaN(numVal)) return;
+  conditions.push(`${col} ${op} ?`);
+  params.push(numVal);
+}
