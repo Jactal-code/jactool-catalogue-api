@@ -1,5 +1,9 @@
-const mysql = require('mysql2/promise');
+const mysql = require('mysql2');
 const ExcelJS = require('exceljs');
+const fs = require('fs');
+const path = require('path');
+const os = require('os');
+const crypto = require('crypto');
 
 // Ordre officiel des colonnes dans la VIEW V_ARTICLES_CATALOGUE
 const VIEW_ORDER = [
@@ -25,6 +29,7 @@ const VIEW_ORDER = [
   'CODE_ACHETEUR','NOM_ACHETEUR','FICHE_SECURITE'
 ];
 const ALLOWED_COLUMNS = new Set(VIEW_ORDER);
+const MAX_CELLS = 50_000_000; // Garde-fou haut : 50 millions de cellules
 
 module.exports = async function (context, req) {
   const clientPrincipal = req.headers['x-ms-client-principal'];
@@ -41,14 +46,12 @@ module.exports = async function (context, req) {
     return;
   }
 
-  // Valider les colonnes
   const validColumns = requestedColumns.filter(c => ALLOWED_COLUMNS.has(c));
   if (validColumns.length === 0) {
     context.res = { status: 400, body: { error: 'No valid columns' } };
     return;
   }
 
-  // Si toutes les colonnes sont demandées → utiliser l'ordre de la VIEW
   let finalColumns;
   if (validColumns.length === VIEW_ORDER.length) {
     finalColumns = [...VIEW_ORDER];
@@ -72,9 +75,13 @@ module.exports = async function (context, req) {
     stock3_op: req.query.stock3_op, stock3_val: req.query.stock3_val,
   };
 
+  // Fichier temporaire pour stocker le XLSX pendant sa génération streaming
+  const tmpFilename = path.join(os.tmpdir(), `export_${crypto.randomBytes(8).toString('hex')}.xlsx`);
   let connection;
+
   try {
-    connection = await mysql.createConnection({
+    // Connexion mysql2 en mode callback (non-promise) pour pouvoir utiliser query().stream()
+    connection = mysql.createConnection({
       host: process.env.MYSQL_HOST,
       port: process.env.MYSQL_PORT || 3306,
       user: process.env.MYSQL_USER,
@@ -82,12 +89,14 @@ module.exports = async function (context, req) {
       database: process.env.MYSQL_DATABASE
     });
 
+    await connectAsync(connection);
+
     const { where, params } = buildWhere(search, f);
     const colsList = finalColumns.map(c => `\`${c}\``).join(', ');
 
-    // GARDE-FOU : compter les lignes avant de générer l'Excel pour éviter un OOM
-    const MAX_CELLS = 2_000_000;
-    const [countRows] = await connection.execute(
+    // GARDE-FOU HAUT : compter les lignes avant (empêche les abus absurdes)
+    const [countRows] = await queryAsync(
+      connection,
       `SELECT COUNT(*) AS total FROM V_ARTICLES_CATALOGUE ${where}`,
       params
     );
@@ -111,31 +120,62 @@ module.exports = async function (context, req) {
       return;
     }
 
-    const [rows] = await connection.execute(
-      `SELECT ${colsList} FROM V_ARTICLES_CATALOGUE ${where} ORDER BY PERTINANCE DESC, REF_JACTAL ASC`,
-      params
-    );
+    context.log(`Export streaming démarré : ${totalRows} lignes × ${finalColumns.length} colonnes`);
+    const startTime = Date.now();
 
-    const workbook = new ExcelJS.Workbook();
+    // Création du workbook en mode STREAMING (écrit dans un fichier temporaire)
+    const workbook = new ExcelJS.stream.xlsx.WorkbookWriter({
+      filename: tmpFilename,
+      useStyles: true,
+      useSharedStrings: false // Plus rapide et moins gourmand en RAM
+    });
+
     const sheet = workbook.addWorksheet('Articles');
+    sheet.columns = finalColumns.map(c => ({ header: c, key: c, width: 20 }));
 
-    sheet.columns = finalColumns.map(c => ({
-      header: c,
-      key: c,
-      width: 20
-    }));
+    // Header stylisé
+    const headerRow = sheet.getRow(1);
+    headerRow.font = { bold: true, color: { argb: 'FFFFFFFF' } };
+    headerRow.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF1E3A5F' } };
+    headerRow.commit();
 
-    sheet.getRow(1).font = { bold: true, color: { argb: 'FFFFFFFF' } };
-    sheet.getRow(1).fill = {
-      type: 'pattern',
-      pattern: 'solid',
-      fgColor: { argb: 'FF1E3A5F' }
-    };
+    // Streaming MySQL → Excel (RAM constante ~50-100 Mo)
+    await new Promise((resolve, reject) => {
+      const queryStream = connection.query(
+        `SELECT ${colsList} FROM V_ARTICLES_CATALOGUE ${where} ORDER BY PERTINANCE DESC, REF_JACTAL ASC`,
+        params
+      ).stream({ highWaterMark: 500 });
 
-    rows.forEach(row => sheet.addRow(row));
+      let rowCount = 0;
 
-    const buffer = await workbook.xlsx.writeBuffer();
+      queryStream.on('error', (err) => {
+        context.log.error('Erreur MySQL stream:', err);
+        reject(err);
+      });
 
+      queryStream.on('data', (row) => {
+        sheet.addRow(row).commit();
+        rowCount++;
+        if (rowCount % 10000 === 0) {
+          context.log(`  ${rowCount} lignes écrites...`);
+        }
+      });
+
+      queryStream.on('end', async () => {
+        try {
+          await sheet.commit();
+          await workbook.commit();
+          const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+          context.log(`Export terminé : ${rowCount} lignes en ${elapsed}s`);
+          resolve();
+        } catch (err) {
+          reject(err);
+        }
+      });
+    });
+
+    // Lire le fichier généré et le retourner
+    const buffer = fs.readFileSync(tmpFilename);
     const now = new Date();
     const filename = `articles_${now.toISOString().slice(0, 10).replace(/-/g, '')}_${now.getHours()}${String(now.getMinutes()).padStart(2, '0')}.xlsx`;
 
@@ -152,9 +192,29 @@ module.exports = async function (context, req) {
     context.log.error('Export error:', err);
     context.res = { status: 500, body: { error: err.message } };
   } finally {
-    if (connection) await connection.end();
+    // Nettoyage : fermer MySQL et supprimer le fichier temporaire
+    if (connection) {
+      try { connection.end(); } catch (_) {}
+    }
+    try { if (fs.existsSync(tmpFilename)) fs.unlinkSync(tmpFilename); } catch (_) {}
   }
 };
+
+// Helpers pour wrapper les callbacks mysql2 en promises
+function connectAsync(conn) {
+  return new Promise((resolve, reject) => {
+    conn.connect(err => err ? reject(err) : resolve());
+  });
+}
+
+function queryAsync(conn, sql, params) {
+  return new Promise((resolve, reject) => {
+    conn.query(sql, params, (err, results, fields) => {
+      if (err) reject(err);
+      else resolve([results, fields]);
+    });
+  });
+}
 
 function parseList(str) {
   if (!str) return [];
