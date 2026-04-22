@@ -43,7 +43,8 @@ module.exports = async function (context, req) {
     cat_web: parseList(req.query.cat_web),
     sous_cat_web: parseList(req.query.sous_cat_web),
     acheteurs: parseList(req.query.acheteurs),
-    rayons: parseList(req.query.rayons).map(r => parseInt(r, 10)).filter(n => !isNaN(n)),
+    rayons_master: parseList(req.query.rayons_master).map(r => parseInt(r, 10)).filter(n => !isNaN(n)),
+    rayons_client: parseList(req.query.rayons_client).map(r => parseInt(r, 10)).filter(n => !isNaN(n)),
     stock1_op: req.query.stock1_op, stock1_val: req.query.stock1_val,
     stock2_op: req.query.stock2_op, stock2_val: req.query.stock2_val,
     stock3_op: req.query.stock3_op, stock3_val: req.query.stock3_val,
@@ -404,15 +405,16 @@ function buildWhere(search, f) {
     params.push(Number(f.stock3_val));
   }
 
-  // Filtre rayon (sous-requête sur FICDRAY)
-  if (f.rayons && f.rayons.length > 0) {
-    const placeholders = f.rayons.map(() => '?').join(',');
+  // Filtre rayon (sous-requête sur FICDRAY) — combine master + client
+  const allRayonIds = [...(f.rayons_master || []), ...(f.rayons_client || [])];
+  if (allRayonIds.length > 0) {
+    const placeholders = allRayonIds.map(() => '?').join(',');
     conditions.push(`REF_JACTAL IN (
       SELECT TRIM(DR_ART) FROM FICDRAY
       WHERE CAST(LEFT(DR_NUM, 6) AS UNSIGNED) IN (${placeholders})
         AND TRIM(DR_ART) != ''
     )`);
-    params.push(...f.rayons);
+    params.push(...allRayonIds);
   }
 
   const where = conditions.length > 0 ? 'WHERE ' + conditions.join(' AND ') : '';
