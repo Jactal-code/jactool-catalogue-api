@@ -85,6 +85,32 @@ module.exports = async function (context, req) {
     const { where, params } = buildWhere(search, f);
     const colsList = finalColumns.map(c => `\`${c}\``).join(', ');
 
+    // GARDE-FOU : compter les lignes avant de générer l'Excel pour éviter un OOM
+    const MAX_CELLS = 2_000_000;
+    const [countRows] = await connection.execute(
+      `SELECT COUNT(*) AS total FROM V_ARTICLES_CATALOGUE ${where}`,
+      params
+    );
+    const totalRows = countRows[0].total;
+    const totalCells = totalRows * finalColumns.length;
+
+    if (totalCells > MAX_CELLS) {
+      context.res = {
+        status: 400,
+        body: {
+          error: 'EXPORT_TOO_LARGE',
+          message: `Export trop volumineux : ${totalRows.toLocaleString('fr-FR')} lignes × ${finalColumns.length} colonnes = ${(totalCells / 1_000_000).toFixed(1)} millions de cellules. Limite : ${(MAX_CELLS / 1_000_000).toFixed(0)} millions.`,
+          totalRows: totalRows,
+          totalColumns: finalColumns.length,
+          totalCells: totalCells,
+          maxCells: MAX_CELLS,
+          suggestedMaxRows: Math.floor(MAX_CELLS / finalColumns.length),
+          suggestedMaxColumns: Math.floor(MAX_CELLS / Math.max(totalRows, 1))
+        }
+      };
+      return;
+    }
+
     const [rows] = await connection.execute(
       `SELECT ${colsList} FROM V_ARTICLES_CATALOGUE ${where} ORDER BY PERTINANCE DESC, REF_JACTAL ASC`,
       params
