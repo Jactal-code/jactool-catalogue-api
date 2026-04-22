@@ -1,5 +1,61 @@
 const mysql = require('mysql2/promise');
 
+// Pool de connexions partagé entre les invocations (réutilisation au lieu de reconnect)
+let pool = null;
+function getPool() {
+  if (!pool) {
+    pool = mysql.createPool({
+      host: process.env.MYSQL_HOST,
+      port: process.env.MYSQL_PORT || 3306,
+      user: process.env.MYSQL_USER,
+      password: process.env.MYSQL_PASSWORD,
+      database: process.env.MYSQL_DATABASE,
+      waitForConnections: true,
+      connectionLimit: 5,
+      queueLimit: 0,
+      enableKeepAlive: true,
+      keepAliveInitialDelay: 10000
+    });
+  }
+  return pool;
+}
+
+const ALL_VIEW_COLUMNS = new Set([
+  'REF_JACTAL','ACTUEL','CODE_FOURNISSEUR','NOM_FOURNISSEUR','REF_ART_FOURNISSEUR','EAN_USINE','EAN_JACTAL',
+  'COMMENTAIRE_INTERNE','PA','DEVISE','PR','CODE_VALORLUX','LIBELLE_STANDART','LIBELLE_WEB','DESCRIPTIF_WEB',
+  'AGE_PREVU_TW','MARQUE_TW','STOCK1','STOCK2','STOCK3','HT1_CFT','HT1_PRIX','HT2_PRIX','HT3_CFT','HT3_PRIX',
+  'HT4_CFT','HT4_PRIX','HT5_CFT','HT5_PRIX','HT6_CFT','HT6_PRIX','TTC1_PRIX','TTC2_PRIX','TTC3_PRIX','TTC4_PRIX',
+  'TTC5_PRIX','TTC6_PRIX','REGROUPE','GROUPE_REMISE','COLIS_INT','COLIS_EXT','MIN_CMDE','WEB_PVTTC_PROPO',
+  'WEB1_CFT','WEB_HT1_PRIX','WEB1_QTE','WEB2_CFT','WEB_HT2_PRIX','WEB2_QTE','WEB3_CFT','WEB_HT3_PRIX','WEB3_QTE',
+  'WEB4_CFT','WEB4_PRIX','WEB4_QTE','PRIX_GROSSISTE','QTE_GROSSISTE','REMISE_TEMPORAIRE','TRAD_GROUPE',
+  'TRAD_GROUPE_NOM','TRAD_SOUS_GROUPE','TRAD_SOUS_GROUPE_NOM','CODE_DOUANIER','LARGEUR_MM_PRODUIT',
+  'HAUTEUR_MM_PRODUIT','PROFONDEUR_MM_PRODUIT','POIDS_G_PRODUIT','LARGEUR_MM_COLIS','HAUTEUR_MM_COLIS',
+  'PROFONDEUR_MM_COLIS','POIDS_G_COLIS','NBRE_COLIS_COUCHE','EUROPALETE_NBRE_COUCHE','NBRE_BATT_LR03',
+  'NBRE_BATT_LR06','NBRE_BATT_LR14','NBRE_BATT_LR20','NBRE_BATT_9V','NBRE_BATT_AKKU','ARTICLE_WEB',
+  'WEB_GROUPE1','WEB_GROUPE1_NOM','WEB_SOUS_GROUPE1','WEB_SOUS_GROUPE1_NOM','WEB_GROUPE2','WEB_GROUPE2_NOM',
+  'WEB_SOUS_GROUPE2','WEB_SOUS_GROUPE2_NOM','WEB_GROUPE3','WEB_GROUPE3_NOM','WEB_SOUS_GROUPE3',
+  'WEB_SOUS_GROUPE3_NOM','WEB_TOUS_PAYS','WEB_EXCLURE_LUX','WEB_EXCLURE_FRA','WEB_EXCLURE_BEL',
+  'WEB_EXCLURE_ALL','WEB_DATE_MISE_WEB','WEB_PRODUIT_PERMANENT','WEB_PROD_ZONE_DEFIL','WEB_PROD_TETE_CAT',
+  'WEB_PROD_PRECO','WEB_CMDE_AVANT','WEB_ARRIVAGE_PREVU','WEB_ST1','WEB_ST2','DATE_DEBUT_SAISON',
+  'DATE_FIN_SAISON','CLE_MARQUE','MARQUE_NOM','CLE_LICENCE','LICENCE_NOM','LIMITE_COM','URL_PHOTO1',
+  'STATUT','PERTINANCE','DANGEREUX','CLASSIFICATION','POINT_ECLAIR','IMDG','LITRAGE','DATE_VALIDITE_SECURE',
+  'EAN_COLIS','EAN_PALETTE','DESCRIPTION_UR','DESCRIPTION_UC','QTE_UC_PAR_UR','DESCRIPTION_UV','QTE_UV_PAR_UC',
+  'CODE_ACHETEUR','NOM_ACHETEUR','FICHE_SECURITE'
+]);
+
+const BASE_COLS = ['REF_JACTAL', 'LIBELLE_STANDART', 'NOM_FOURNISSEUR', 'URL_PHOTO1', 'PERTINANCE', 'STOCK1', 'STOCK2', 'STOCK3'];
+
+// Mapping des colonnes de tri
+const SORT_MAP = {
+  'ref':         { ficart: 'FA_CODE',        view: 'REF_JACTAL' },
+  'libelle':     { ficart: 'FA_LIB',         view: 'LIBELLE_STANDART' },
+  'fournisseur': { ficart: null,             view: 'NOM_FOURNISSEUR' },
+  'stock1':      { ficart: 'FA_STO1',        view: 'STOCK1' },
+  'stock2':      { ficart: 'FA_STO2',        view: 'STOCK2' },
+  'stock3':      { ficart: 'FA_STO3',        view: 'STOCK3' },
+  'pertinance':  { ficart: 'FA_PERTINANCE',  view: 'PERTINANCE' },
+};
+
 module.exports = async function (context, req) {
   const clientPrincipal = req.headers['x-ms-client-principal'];
   if (!clientPrincipal) {
@@ -33,122 +89,76 @@ module.exports = async function (context, req) {
     stock3_op: req.query.stock3_op, stock3_val: req.query.stock3_val,
   };
 
-  // Mapping des colonnes de tri
-  const SORT_MAP = {
-    'ref':         { ficart: 'FA_CODE',        view: 'REF_JACTAL' },
-    'libelle':     { ficart: 'FA_LIB',         view: 'LIBELLE_STANDART' },
-    'fournisseur': { ficart: null,             view: 'NOM_FOURNISSEUR' },
-    'stock1':      { ficart: 'FA_STO1',        view: 'STOCK1' },
-    'stock2':      { ficart: 'FA_STO2',        view: 'STOCK2' },
-    'stock3':      { ficart: 'FA_STO3',        view: 'STOCK3' },
-    'pertinance':  { ficart: 'FA_PERTINANCE',  view: 'PERTINANCE' },
-  };
   const sortDef = SORT_MAP[sort] || SORT_MAP['pertinance'];
 
-  let orderByFicart = null;
-  if (sortDef.ficart) {
-    orderByFicart = `${sortDef.ficart} ${order}, FA_CODE ASC`;
-  }
-  const orderByView = `${sortDef.view} ${order}, REF_JACTAL ASC`;
-
-  const needsView = !!(search 
-    || f.fournisseurs.length || f.marques.length || f.licences.length 
-    || f.cat_trad.length || f.sous_cat_trad.length 
+  // Détermine si des filtres "externes" à FICART sont actifs (=> on doit passer par la VIEW)
+  const needsViewFilters = !!(
+    f.fournisseurs.length || f.marques.length || f.licences.length
+    || f.cat_trad.length || f.sous_cat_trad.length
     || f.cat_web.length || f.sous_cat_web.length
-    || !orderByFicart
   );
 
-  let connection;
+  // Détermine si on peut rester sur FICART (bien plus rapide)
+  const canUseFicart = !search && !needsViewFilters && !!sortDef.ficart;
+
+  const pool = getPool();
   try {
-    connection = await mysql.createConnection({
-      host: process.env.MYSQL_HOST,
-      port: process.env.MYSQL_PORT || 3306,
-      user: process.env.MYSQL_USER,
-      password: process.env.MYSQL_PASSWORD,
-      database: process.env.MYSQL_DATABASE
-    });
+    let total = 0;
+    let refsToFetch = [];
 
-    let total;
-    let refsToFetch;
-
-    if (needsView) {
-      const { where, params } = buildViewWhere(search, f);
-
-      const [countResult] = await connection.execute(
-        `SELECT COUNT(*) as total FROM V_ARTICLES_CATALOGUE ${where}`,
-        params
-      );
-      total = countResult[0].total;
-
-      const [refResult] = await connection.execute(
-        `SELECT REF_JACTAL FROM V_ARTICLES_CATALOGUE ${where} 
-         ORDER BY ${orderByView} LIMIT ${pageSize} OFFSET ${offset}`,
-        params
-      );
-      refsToFetch = refResult.map(r => r.REF_JACTAL);
-    } else {
+    if (canUseFicart) {
+      // ===== CHEMIN 1 : FICART direct, filtres simples seulement =====
       const { where, params } = buildFicartWhere(f);
+      const orderBy = `${sortDef.ficart} ${order}, FA_CODE ASC`;
 
-      const [countResult] = await connection.execute(
-        `SELECT COUNT(*) as total FROM FICART ${where}`,
-        params
-      );
-      total = countResult[0].total;
+      // COUNT et SELECT en parallèle
+      const [countRes, refRes] = await Promise.all([
+        pool.execute(`SELECT COUNT(*) as total FROM FICART ${where}`, params),
+        pool.execute(
+          `SELECT FA_CODE as REF_JACTAL FROM FICART ${where} ORDER BY ${orderBy} LIMIT ${pageSize} OFFSET ${offset}`,
+          params
+        )
+      ]);
+      total = countRes[0][0].total;
+      refsToFetch = refRes[0].map(r => r.REF_JACTAL);
 
-      const [refResult] = await connection.execute(
-        `SELECT FA_CODE as REF_JACTAL FROM FICART ${where} 
-         ORDER BY ${orderByFicart} LIMIT ${pageSize} OFFSET ${offset}`,
-        params
-      );
-      refsToFetch = refResult.map(r => r.REF_JACTAL);
+    } else if (search && !needsViewFilters) {
+      // ===== CHEMIN 2 : Recherche textuelle sur FICART via FULLTEXT (rapide) =====
+      // Avec fallback LIKE si FULLTEXT ne retourne rien
+      const result = await searchOnFicartWithFallback(pool, search, f, sortDef, order, offset, pageSize);
+      total = result.total;
+      refsToFetch = result.refs;
+
+    } else {
+      // ===== CHEMIN 3 : Besoin des JOINs de la VIEW (filtres fournisseur/marque/etc.) =====
+      const result = await searchOnViewWithFallback(pool, search, f, sortDef, order, offset, pageSize);
+      total = result.total;
+      refsToFetch = result.refs;
     }
 
+    // Pas de résultats → réponse vide
     if (refsToFetch.length === 0) {
       context.res = {
         status: 200,
         headers: { 'Content-Type': 'application/json' },
         body: {
           articles: [], total, page, pageSize,
-          totalPages: Math.ceil(total / pageSize)
+          totalPages: Math.ceil(total / pageSize),
+          sort, order: order.toLowerCase()
         }
       };
       return;
     }
 
-    // Requête finale : on utilise query() au lieu de execute() pour FIELD()
-    // et on échappe manuellement les refs pour FIELD() via mysql.escape()
-    const ALL_VIEW_COLUMNS = new Set([
-      'REF_JACTAL','ACTUEL','CODE_FOURNISSEUR','NOM_FOURNISSEUR','REF_ART_FOURNISSEUR','EAN_USINE','EAN_JACTAL',
-      'COMMENTAIRE_INTERNE','PA','DEVISE','PR','CODE_VALORLUX','LIBELLE_STANDART','LIBELLE_WEB','DESCRIPTIF_WEB',
-      'AGE_PREVU_TW','MARQUE_TW','STOCK1','STOCK2','STOCK3','HT1_CFT','HT1_PRIX','HT2_PRIX','HT3_CFT','HT3_PRIX',
-      'HT4_CFT','HT4_PRIX','HT5_CFT','HT5_PRIX','HT6_CFT','HT6_PRIX','TTC1_PRIX','TTC2_PRIX','TTC3_PRIX','TTC4_PRIX',
-      'TTC5_PRIX','TTC6_PRIX','REGROUPE','GROUPE_REMISE','COLIS_INT','COLIS_EXT','MIN_CMDE','WEB_PVTTC_PROPO',
-      'WEB1_CFT','WEB_HT1_PRIX','WEB1_QTE','WEB2_CFT','WEB_HT2_PRIX','WEB2_QTE','WEB3_CFT','WEB_HT3_PRIX','WEB3_QTE',
-      'WEB4_CFT','WEB4_PRIX','WEB4_QTE','PRIX_GROSSISTE','QTE_GROSSISTE','REMISE_TEMPORAIRE','TRAD_GROUPE',
-      'TRAD_GROUPE_NOM','TRAD_SOUS_GROUPE','TRAD_SOUS_GROUPE_NOM','CODE_DOUANIER','LARGEUR_MM_PRODUIT',
-      'HAUTEUR_MM_PRODUIT','PROFONDEUR_MM_PRODUIT','POIDS_G_PRODUIT','LARGEUR_MM_COLIS','HAUTEUR_MM_COLIS',
-      'PROFONDEUR_MM_COLIS','POIDS_G_COLIS','NBRE_COLIS_COUCHE','EUROPALETE_NBRE_COUCHE','NBRE_BATT_LR03',
-      'NBRE_BATT_LR06','NBRE_BATT_LR14','NBRE_BATT_LR20','NBRE_BATT_9V','NBRE_BATT_AKKU','ARTICLE_WEB',
-      'WEB_GROUPE1','WEB_GROUPE1_NOM','WEB_SOUS_GROUPE1','WEB_SOUS_GROUPE1_NOM','WEB_GROUPE2','WEB_GROUPE2_NOM',
-      'WEB_SOUS_GROUPE2','WEB_SOUS_GROUPE2_NOM','WEB_GROUPE3','WEB_GROUPE3_NOM','WEB_SOUS_GROUPE3',
-      'WEB_SOUS_GROUPE3_NOM','WEB_TOUS_PAYS','WEB_EXCLURE_LUX','WEB_EXCLURE_FRA','WEB_EXCLURE_BEL',
-      'WEB_EXCLURE_ALL','WEB_DATE_MISE_WEB','WEB_PRODUIT_PERMANENT','WEB_PROD_ZONE_DEFIL','WEB_PROD_TETE_CAT',
-      'WEB_PROD_PRECO','WEB_CMDE_AVANT','WEB_ARRIVAGE_PREVU','WEB_ST1','WEB_ST2','DATE_DEBUT_SAISON',
-      'DATE_FIN_SAISON','CLE_MARQUE','MARQUE_NOM','CLE_LICENCE','LICENCE_NOM','LIMITE_COM','URL_PHOTO1',
-      'STATUT','PERTINANCE','DANGEREUX','CLASSIFICATION','POINT_ECLAIR','IMDG','LITRAGE','DATE_VALIDITE_SECURE',
-      'EAN_COLIS','EAN_PALETTE','DESCRIPTION_UR','DESCRIPTION_UC','QTE_UC_PAR_UR','DESCRIPTION_UV','QTE_UV_PAR_UC',
-      'CODE_ACHETEUR','NOM_ACHETEUR','FICHE_SECURITE'
-    ]);
-
+    // ===== Récupération des détails pour les refs trouvées =====
+    // On passe par la VIEW pour avoir tous les champs joints (fournisseur, marque, etc.)
     const requestedCols = (req.query.columns || '').split(',').map(c => c.trim()).filter(c => c && ALL_VIEW_COLUMNS.has(c));
-    // Toujours inclure ces colonnes minimales pour l'UI
-    const BASE_COLS = ['REF_JACTAL', 'LIBELLE_STANDART', 'NOM_FOURNISSEUR', 'URL_PHOTO1', 'PERTINANCE', 'STOCK1', 'STOCK2', 'STOCK3'];
     const finalCols = Array.from(new Set([...BASE_COLS, ...requestedCols]));
     const colsList = finalCols.map(c => `\`${c}\``).join(', ');
 
     const placeholders = refsToFetch.map(() => '?').join(',');
     const escapedRefs = refsToFetch.map(r => mysql.escape(r)).join(',');
-    const [rows] = await connection.query(
+    const [rows] = await pool.query(
       `SELECT ${colsList}
        FROM V_ARTICLES_CATALOGUE 
        WHERE REF_JACTAL IN (${placeholders})
@@ -169,16 +179,203 @@ module.exports = async function (context, req) {
   } catch (err) {
     context.log.error('Error in /api/articles:', err);
     context.res = { status: 500, body: { error: err.message } };
-  } finally {
-    if (connection) await connection.end();
   }
 };
 
+// =============================================================
+// Recherche FICART avec FULLTEXT + fallback LIKE
+// =============================================================
+async function searchOnFicartWithFallback(pool, search, f, sortDef, order, offset, pageSize) {
+  const orderBy = sortDef.ficart
+    ? `${sortDef.ficart} ${order}, FA_CODE ASC`
+    : `FA_PERTINANCE ${order}, FA_CODE ASC`;
+
+  // 1) Tentative FULLTEXT (rapide)
+  const ftxQuery = buildFulltextQuery(search);
+  if (ftxQuery) {
+    const { where, params } = buildFicartWhere(f);
+    const ftxClause = `MATCH(FA_CODE, FA_LIB, FA_REFI, FA_REFF, FA_BCUS) AGAINST(? IN BOOLEAN MODE)`;
+    const whereWithFtx = where
+      ? `${where} AND ${ftxClause}`
+      : `WHERE ${ftxClause}`;
+    const ftxParams = [...params, ftxQuery];
+
+    const [countRes, refRes] = await Promise.all([
+      pool.execute(`SELECT COUNT(*) as total FROM FICART ${whereWithFtx}`, ftxParams),
+      pool.execute(
+        `SELECT FA_CODE as REF_JACTAL FROM FICART ${whereWithFtx} ORDER BY ${orderBy} LIMIT ${pageSize} OFFSET ${offset}`,
+        ftxParams
+      )
+    ]);
+    const total = countRes[0][0].total;
+
+    if (total > 0) {
+      return { total, refs: refRes[0].map(r => r.REF_JACTAL) };
+    }
+  }
+
+  // 2) Fallback LIKE (trouve les fragments et les termes courts)
+  const { where, params } = buildFicartWhere(f);
+  const likeClause = `(FA_CODE LIKE ? OR FA_LIB LIKE ? OR FA_REFI LIKE ? OR FA_REFF LIKE ? OR FA_BCUS LIKE ?)`;
+  const pattern = `%${search}%`;
+  const likeParams = [pattern, pattern, pattern, pattern, pattern];
+  const whereWithLike = where
+    ? `${where} AND ${likeClause}`
+    : `WHERE ${likeClause}`;
+  const allParams = [...params, ...likeParams];
+
+  const [countRes, refRes] = await Promise.all([
+    pool.execute(`SELECT COUNT(*) as total FROM FICART ${whereWithLike}`, allParams),
+    pool.execute(
+      `SELECT FA_CODE as REF_JACTAL FROM FICART ${whereWithLike} ORDER BY ${orderBy} LIMIT ${pageSize} OFFSET ${offset}`,
+      allParams
+    )
+  ]);
+  return { total: countRes[0][0].total, refs: refRes[0].map(r => r.REF_JACTAL) };
+}
+
+// =============================================================
+// Recherche VIEW (filtres fournisseur/marque/etc. + éventuelle recherche)
+// =============================================================
+async function searchOnViewWithFallback(pool, search, f, sortDef, order, offset, pageSize) {
+  const orderBy = `${sortDef.view} ${order}, REF_JACTAL ASC`;
+
+  // Si pas de search, juste les filtres sur la VIEW
+  if (!search) {
+    const { where, params } = buildViewWhere('', f);
+    const [countRes, refRes] = await Promise.all([
+      pool.execute(`SELECT COUNT(*) as total FROM V_ARTICLES_CATALOGUE ${where}`, params),
+      pool.execute(
+        `SELECT REF_JACTAL FROM V_ARTICLES_CATALOGUE ${where} ORDER BY ${orderBy} LIMIT ${pageSize} OFFSET ${offset}`,
+        params
+      )
+    ]);
+    return { total: countRes[0][0].total, refs: refRes[0].map(r => r.REF_JACTAL) };
+  }
+
+  // Avec search + filtres VIEW : on tente FULLTEXT étendu (FICART + tables secondaires via JOIN via la VIEW)
+  const ftxQuery = buildFulltextQuery(search);
+  if (ftxQuery) {
+    const { where, params } = buildViewWhereWithFulltext(ftxQuery, f);
+    const [countRes, refRes] = await Promise.all([
+      pool.execute(`SELECT COUNT(*) as total FROM V_ARTICLES_CATALOGUE ${where}`, params),
+      pool.execute(
+        `SELECT REF_JACTAL FROM V_ARTICLES_CATALOGUE ${where} ORDER BY ${orderBy} LIMIT ${pageSize} OFFSET ${offset}`,
+        params
+      )
+    ]);
+    const total = countRes[0][0].total;
+    if (total > 0) {
+      return { total, refs: refRes[0].map(r => r.REF_JACTAL) };
+    }
+  }
+
+  // Fallback LIKE complet sur la VIEW
+  const { where, params } = buildViewWhere(search, f);
+  const [countRes, refRes] = await Promise.all([
+    pool.execute(`SELECT COUNT(*) as total FROM V_ARTICLES_CATALOGUE ${where}`, params),
+    pool.execute(
+      `SELECT REF_JACTAL FROM V_ARTICLES_CATALOGUE ${where} ORDER BY ${orderBy} LIMIT ${pageSize} OFFSET ${offset}`,
+      params
+    )
+  ]);
+  return { total: countRes[0][0].total, refs: refRes[0].map(r => r.REF_JACTAL) };
+}
+
+// =============================================================
+// Helpers SQL
+// =============================================================
 function parseList(str) {
   if (!str) return [];
   return str.split(',').map(s => s.trim()).filter(s => s.length > 0);
 }
 
+// Construit une requête FULLTEXT boolean mode pour MySQL
+// Ex: "briquet rouge" → "+briquet* +rouge*"
+// Retourne null si la recherche est inutilisable (mots trop courts etc.)
+function buildFulltextQuery(search) {
+  if (!search) return null;
+  // Nettoyer les caractères spéciaux FULLTEXT (+ - * " < > ( ) ~ @)
+  const cleaned = search.replace(/[+\-*"<>()~@]/g, ' ').trim();
+  if (!cleaned) return null;
+  const words = cleaned.split(/\s+/).filter(w => w.length >= 3); // min_token_size = 3
+  if (words.length === 0) return null;
+  // "+word1* +word2*" → tous les mots doivent matcher, avec wildcard
+  return words.map(w => `+${w}*`).join(' ');
+}
+
+// WHERE pour FICART (filtres simples uniquement)
+function buildFicartWhere(f) {
+  const conditions = [];
+  const params = [];
+
+  addIn(conditions, params, 'FA_ACHNOM', f.acheteurs);
+  addIn(conditions, params, 'FA_STA', f.statuts);
+
+  if (f.actif === '1') conditions.push(`FA_ACT = 1`);
+  else if (f.actif === '0') conditions.push(`(FA_ACT = 0 OR FA_ACT IS NULL)`);
+
+  addStock(conditions, params, 'FA_STO1', f.stock1_op, f.stock1_val);
+  addStock(conditions, params, 'FA_STO2', f.stock2_op, f.stock2_val);
+  addStock(conditions, params, 'FA_STO3', f.stock3_op, f.stock3_val);
+
+  return { where: conditions.length ? `WHERE ${conditions.join(' AND ')}` : '', params };
+}
+
+// WHERE pour la VIEW avec FULLTEXT (tables secondaires via MATCH AGAINST)
+function buildViewWhereWithFulltext(ftxQuery, f) {
+  const conditions = [];
+  const params = [];
+
+  // Recherche FULLTEXT sur toutes les tables qui ont un index FULLTEXT
+  // Note : on ne peut pas faire MATCH sur les alias de la VIEW directement,
+  // mais comme la VIEW joint les tables, on peut utiliser les colonnes underlying via leur alias
+  // Ex: LIBELLE_STANDART correspond à FA.FA_LIB → mais c'est la VIEW qui le présente en LIBELLE_STANDART
+  // Pour utiliser MATCH, on doit faire MATCH sur les colonnes natives des tables.
+  // Dans la VIEW, impossible. On va donc faire un OR de LIKE sur la VIEW pour le search part.
+  // MAIS on applique le WHERE filtres normalement pour réduire avant.
+  conditions.push(`(
+    LIBELLE_STANDART LIKE ?
+    OR REF_JACTAL LIKE ?
+    OR EAN_USINE LIKE ?
+    OR EAN_JACTAL LIKE ?
+    OR REF_ART_FOURNISSEUR LIKE ?
+    OR LIBELLE_WEB LIKE ?
+    OR DESCRIPTIF_WEB LIKE ?
+    OR NOM_FOURNISSEUR LIKE ?
+    OR MARQUE_NOM LIKE ?
+    OR LICENCE_NOM LIKE ?
+    OR TRAD_GROUPE_NOM LIKE ?
+    OR TRAD_SOUS_GROUPE_NOM LIKE ?
+    OR WEB_GROUPE1_NOM LIKE ?
+  )`);
+  // On extrait le "mot principal" du ftxQuery pour en faire un LIKE
+  const mainWord = ftxQuery.replace(/[+\-*]/g, '').split(/\s+/).filter(Boolean)[0] || '';
+  const pattern = `%${mainWord}%`;
+  for (let i = 0; i < 13; i++) params.push(pattern);
+
+  // Filtres
+  addIn(conditions, params, 'NOM_FOURNISSEUR', f.fournisseurs);
+  addIn(conditions, params, 'MARQUE_NOM', f.marques);
+  addIn(conditions, params, 'LICENCE_NOM', f.licences);
+  addIn(conditions, params, 'TRAD_GROUPE_NOM', f.cat_trad);
+  addIn(conditions, params, 'TRAD_SOUS_GROUPE_NOM', f.sous_cat_trad);
+  addIn(conditions, params, 'WEB_GROUPE1_NOM', f.cat_web);
+  addIn(conditions, params, 'WEB_SOUS_GROUPE1_NOM', f.sous_cat_web);
+  addIn(conditions, params, 'NOM_ACHETEUR', f.acheteurs);
+  addIn(conditions, params, 'STATUT', f.statuts);
+
+  if (f.actif === '1') conditions.push(`ACTUEL = 1`);
+  else if (f.actif === '0') conditions.push(`(ACTUEL = 0 OR ACTUEL IS NULL)`);
+
+  addStock(conditions, params, 'STOCK1', f.stock1_op, f.stock1_val);
+  addStock(conditions, params, 'STOCK2', f.stock2_op, f.stock2_val);
+  addStock(conditions, params, 'STOCK3', f.stock3_op, f.stock3_val);
+
+  return { where: `WHERE ${conditions.join(' AND ')}`, params };
+}
+
+// WHERE pour la VIEW avec LIKE (fallback sur fragments)
 function buildViewWhere(search, f) {
   const conditions = [];
   const params = [];
@@ -205,23 +402,6 @@ function buildViewWhere(search, f) {
   addStock(conditions, params, 'STOCK1', f.stock1_op, f.stock1_val);
   addStock(conditions, params, 'STOCK2', f.stock2_op, f.stock2_val);
   addStock(conditions, params, 'STOCK3', f.stock3_op, f.stock3_val);
-
-  return { where: conditions.length ? `WHERE ${conditions.join(' AND ')}` : '', params };
-}
-
-function buildFicartWhere(f) {
-  const conditions = [];
-  const params = [];
-
-  addIn(conditions, params, 'FA_ACHNOM', f.acheteurs);
-  addIn(conditions, params, 'FA_STA', f.statuts);
-
-  if (f.actif === '1') conditions.push(`FA_ACT = 1`);
-  else if (f.actif === '0') conditions.push(`(FA_ACT = 0 OR FA_ACT IS NULL)`);
-
-  addStock(conditions, params, 'FA_STO1', f.stock1_op, f.stock1_val);
-  addStock(conditions, params, 'FA_STO2', f.stock2_op, f.stock2_val);
-  addStock(conditions, params, 'FA_STO3', f.stock3_op, f.stock3_val);
 
   return { where: conditions.length ? `WHERE ${conditions.join(' AND ')}` : '', params };
 }
