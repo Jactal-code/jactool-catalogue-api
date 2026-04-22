@@ -1,7 +1,7 @@
 const mysql = require('mysql2/promise');
 const ExcelJS = require('exceljs');
 
-// Ordre officiel des colonnes dans la VIEW
+// Ordre officiel des colonnes dans la VIEW V_ARTICLES_CATALOGUE
 const VIEW_ORDER = [
   'REF_JACTAL','ACTUEL','CODE_FOURNISSEUR','NOM_FOURNISSEUR','REF_ART_FOURNISSEUR','EAN_USINE','EAN_JACTAL',
   'COMMENTAIRE_INTERNE','PA','DEVISE','PR','CODE_VALORLUX','LIBELLE_STANDART','LIBELLE_WEB','DESCRIPTIF_WEB',
@@ -35,7 +35,7 @@ module.exports = async function (context, req) {
 
   const search = (req.query.search || '').trim();
   const requestedColumns = parseList(req.query.columns);
-  
+
   if (requestedColumns.length === 0) {
     context.res = { status: 400, body: { error: 'No columns selected' } };
     return;
@@ -49,12 +49,11 @@ module.exports = async function (context, req) {
   }
 
   // Si toutes les colonnes sont demandées → utiliser l'ordre de la VIEW
-  // (on vérifie par la taille : si length correspond à VIEW_ORDER.length, on force l'ordre natif)
   let finalColumns;
   if (validColumns.length === VIEW_ORDER.length) {
     finalColumns = [...VIEW_ORDER];
   } else {
-    finalColumns = validColumns; // respecter l'ordre envoyé par l'utilisateur
+    finalColumns = validColumns;
   }
 
   const f = {
@@ -110,7 +109,7 @@ module.exports = async function (context, req) {
     rows.forEach(row => sheet.addRow(row));
 
     const buffer = await workbook.xlsx.writeBuffer();
-    
+
     const now = new Date();
     const filename = `articles_${now.toISOString().slice(0, 10).replace(/-/g, '')}_${now.getHours()}${String(now.getMinutes()).padStart(2, '0')}.xlsx`;
 
@@ -124,6 +123,7 @@ module.exports = async function (context, req) {
       isRaw: true
     };
   } catch (err) {
+    context.log.error('Export error:', err);
     context.res = { status: 500, body: { error: err.message } };
   } finally {
     if (connection) await connection.end();
@@ -140,4 +140,66 @@ function buildWhere(search, f) {
   const params = [];
 
   if (search) {
-    conditions.push(`(REF_JACTAL LIKE ? OR NOM_FOURNISSEUR LIKE ? OR EAN_JACTAL LIKE ? OR EAN_USINE LIKE ? OR LIBELLE_STANDART LIKE ? OR LIBELLE_WEB LIKE ? OR DESCRIPTIF_WEB LIKE ? OR LICENCE_NOM LIKE ? OR MARQUE_NOM LIKE ? OR TRAD_GROUPE_NOM LIKE ? OR TRAD_SOUS_GROUPE_NOM LIKE ? OR WEB_GROUPE1_NOM LIKE ? OR WEB_SOUS_GROUPE1_NOM LIKE ?)`)
+    conditions.push(`(REF_JACTAL LIKE ? OR NOM_FOURNISSEUR LIKE ? OR EAN_JACTAL LIKE ? OR EAN_USINE LIKE ? OR LIBELLE_STANDART LIKE ? OR LIBELLE_WEB LIKE ? OR DESCRIPTIF_WEB LIKE ? OR LICENCE_NOM LIKE ? OR MARQUE_NOM LIKE ? OR TRAD_GROUPE_NOM LIKE ? OR TRAD_SOUS_GROUPE_NOM LIKE ? OR WEB_GROUPE1_NOM LIKE ? OR WEB_SOUS_GROUPE1_NOM LIKE ?)`);
+    const like = `%${search}%`;
+    for (let i = 0; i < 13; i++) params.push(like);
+  }
+
+  if (f.fournisseurs.length > 0) {
+    conditions.push(`NOM_FOURNISSEUR IN (${f.fournisseurs.map(() => '?').join(',')})`);
+    params.push(...f.fournisseurs);
+  }
+  if (f.marques.length > 0) {
+    conditions.push(`MARQUE_NOM IN (${f.marques.map(() => '?').join(',')})`);
+    params.push(...f.marques);
+  }
+  if (f.licences.length > 0) {
+    conditions.push(`LICENCE_NOM IN (${f.licences.map(() => '?').join(',')})`);
+    params.push(...f.licences);
+  }
+  if (f.actif === '1' || f.actif === '0') {
+    conditions.push(`ACTUEL = ?`);
+    params.push(f.actif === '1' ? 1 : 0);
+  }
+  if (f.statuts.length > 0) {
+    conditions.push(`STATUT IN (${f.statuts.map(() => '?').join(',')})`);
+    params.push(...f.statuts);
+  }
+  if (f.cat_trad.length > 0) {
+    conditions.push(`TRAD_GROUPE_NOM IN (${f.cat_trad.map(() => '?').join(',')})`);
+    params.push(...f.cat_trad);
+  }
+  if (f.sous_cat_trad.length > 0) {
+    conditions.push(`TRAD_SOUS_GROUPE_NOM IN (${f.sous_cat_trad.map(() => '?').join(',')})`);
+    params.push(...f.sous_cat_trad);
+  }
+  if (f.cat_web.length > 0) {
+    conditions.push(`WEB_GROUPE1_NOM IN (${f.cat_web.map(() => '?').join(',')})`);
+    params.push(...f.cat_web);
+  }
+  if (f.sous_cat_web.length > 0) {
+    conditions.push(`WEB_SOUS_GROUPE1_NOM IN (${f.sous_cat_web.map(() => '?').join(',')})`);
+    params.push(...f.sous_cat_web);
+  }
+  if (f.acheteurs.length > 0) {
+    conditions.push(`NOM_ACHETEUR IN (${f.acheteurs.map(() => '?').join(',')})`);
+    params.push(...f.acheteurs);
+  }
+
+  const validOps = ['>', '>=', '<', '<=', '=', '!='];
+  if (f.stock1_op && validOps.includes(f.stock1_op) && f.stock1_val !== '' && f.stock1_val !== undefined) {
+    conditions.push(`STOCK1 ${f.stock1_op} ?`);
+    params.push(Number(f.stock1_val));
+  }
+  if (f.stock2_op && validOps.includes(f.stock2_op) && f.stock2_val !== '' && f.stock2_val !== undefined) {
+    conditions.push(`STOCK2 ${f.stock2_op} ?`);
+    params.push(Number(f.stock2_val));
+  }
+  if (f.stock3_op && validOps.includes(f.stock3_op) && f.stock3_val !== '' && f.stock3_val !== undefined) {
+    conditions.push(`STOCK3 ${f.stock3_op} ?`);
+    params.push(Number(f.stock3_val));
+  }
+
+  const where = conditions.length > 0 ? 'WHERE ' + conditions.join(' AND ') : '';
+  return { where, params };
+}
