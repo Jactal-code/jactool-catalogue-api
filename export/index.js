@@ -40,6 +40,7 @@ module.exports = async function (context, req) {
 
   const search = (req.query.search || '').trim();
   const requestedColumns = parseList(req.query.columns);
+  const format = (req.query.format === 'csv') ? 'csv' : 'xlsx';
 
   if (requestedColumns.length === 0) {
     context.res = { status: 400, body: { error: 'No columns selected' } };
@@ -120,9 +121,70 @@ module.exports = async function (context, req) {
       return;
     }
 
-    context.log(`Export streaming démarré : ${totalRows} lignes × ${finalColumns.length} colonnes`);
+    context.log(`Export streaming démarré : ${totalRows} lignes × ${finalColumns.length} colonnes (format: ${format})`);
     const startTime = Date.now();
 
+    if (format === 'csv') {
+      // ================ BRANCHE CSV ================
+      const csvPath = tmpFilename.replace(/\.xlsx$/, '.csv');
+      const writeStream = fs.createWriteStream(csvPath, { encoding: 'utf8' });
+
+      // BOM UTF-8 pour Excel (accents)
+      writeStream.write('\uFEFF');
+
+      // Header : séparateur point-virgule pour Excel FR
+      writeStream.write(finalColumns.map(csvEscape).join(';') + '\n');
+
+      await new Promise((resolve, reject) => {
+        const queryStream = connection.query(
+          `SELECT ${colsList} FROM V_ARTICLES_CATALOGUE ${where} ORDER BY PERTINANCE DESC, REF_JACTAL ASC`,
+          params
+        ).stream({ highWaterMark: 500 });
+
+        let rowCount = 0;
+
+        queryStream.on('error', (err) => {
+          context.log.error('Erreur MySQL stream:', err);
+          writeStream.end();
+          reject(err);
+        });
+
+        queryStream.on('data', (row) => {
+          const line = finalColumns.map(col => csvEscape(row[col])).join(';') + '\n';
+          writeStream.write(line);
+          rowCount++;
+          if (rowCount % 20000 === 0) {
+            context.log(`  ${rowCount} lignes écrites...`);
+          }
+        });
+
+        queryStream.on('end', () => {
+          writeStream.end(() => {
+            const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+            context.log(`Export CSV terminé : ${rowCount} lignes en ${elapsed}s`);
+            resolve();
+          });
+        });
+      });
+
+      const buffer = fs.readFileSync(csvPath);
+      try { fs.unlinkSync(csvPath); } catch (_) {}
+      const now = new Date();
+      const filename = `articles_${now.toISOString().slice(0, 10).replace(/-/g, '')}_${now.getHours()}${String(now.getMinutes()).padStart(2, '0')}.csv`;
+
+      context.res = {
+        status: 200,
+        headers: {
+          'Content-Type': 'text/csv; charset=utf-8',
+          'Content-Disposition': `attachment; filename="${filename}"`
+        },
+        body: buffer,
+        isRaw: true
+      };
+      return;
+    }
+
+    // ================ BRANCHE XLSX (streaming) ================
     // Création du workbook en mode STREAMING (écrit dans un fichier temporaire)
     const workbook = new ExcelJS.stream.xlsx.WorkbookWriter({
       filename: tmpFilename,
@@ -166,7 +228,7 @@ module.exports = async function (context, req) {
           await sheet.commit();
           await workbook.commit();
           const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
-          context.log(`Export terminé : ${rowCount} lignes en ${elapsed}s`);
+          context.log(`Export XLSX terminé : ${rowCount} lignes en ${elapsed}s`);
           resolve();
         } catch (err) {
           reject(err);
@@ -219,6 +281,16 @@ function queryAsync(conn, sql, params) {
 function parseList(str) {
   if (!str) return [];
   return str.split(',').map(s => s.trim()).filter(s => s.length > 0);
+}
+
+// Échappe une valeur pour CSV (RFC 4180) : entoure de guillemets si contient ; " \n ou \r
+function csvEscape(val) {
+  if (val === null || val === undefined) return '';
+  let str = String(val);
+  if (str.includes(';') || str.includes('"') || str.includes('\n') || str.includes('\r')) {
+    str = '"' + str.replace(/"/g, '""') + '"';
+  }
+  return str;
 }
 
 function buildWhere(search, f) {
