@@ -529,6 +529,7 @@ async function getRayonsForRefs(pool, refs) {
      FROM FICDRAY D
      JOIN FICERAY E ON E.ER_NUM = CAST(LEFT(D.DR_NUM, 6) AS UNSIGNED)
      WHERE TRIM(D.DR_ART) IN (${placeholders})
+       AND E.ER_STA IN (1, 3)
        AND TRIM(E.ER_REF) != ''
      ORDER BY E.ER_MASTER DESC, E.ER_DATE DESC`,
     refs
