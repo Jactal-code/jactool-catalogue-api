@@ -39,7 +39,8 @@ module.exports = async function (context, req) {
       catWebRes,
       sousCatWebRes,
       acheteursRes,
-      rayonsRes
+      rayonsRes,
+      rayonsClientRes
     ] = await Promise.all([
       pool.execute(`SELECT DISTINCT FF_NOM AS val FROM FICFOU WHERE FF_NOM IS NOT NULL AND FF_NOM != '' ORDER BY FF_NOM`),
       pool.execute(`SELECT DISTINCT LIBE_MARQUE AS val FROM FICMARQUE WHERE LIBE_MARQUE IS NOT NULL AND LIBE_MARQUE != '' ORDER BY LIBE_MARQUE`),
@@ -50,7 +51,8 @@ module.exports = async function (context, req) {
       pool.execute(`SELECT DISTINCT C2_LIB AS val FROM CATWEB WHERE C2_LIB IS NOT NULL AND C2_LIB != '' ORDER BY C2_LIB`),
       pool.execute(`SELECT DISTINCT S1_LIB AS val FROM SCATWEB WHERE S1_LIB IS NOT NULL AND S1_LIB != '' ORDER BY S1_LIB`),
       pool.execute(`SELECT DISTINCT FA_ACHNOM AS val FROM FICART WHERE FA_ACHNOM IS NOT NULL AND FA_ACHNOM != '' ORDER BY FA_ACHNOM`),
-      pool.execute(`SELECT ER_NUM AS id, TRIM(ER_REF) AS nom, ER_DATE AS date FROM FICERAY WHERE ER_MASTER = 1 AND TRIM(ER_REF) != '' ORDER BY ER_DATE DESC, ER_NUM DESC`)
+      pool.execute(`SELECT ER_NUM AS id, TRIM(ER_REF) AS nom, ER_DATE AS date FROM FICERAY WHERE ER_MASTER = 1 AND TRIM(ER_REF) != '' ORDER BY ER_DATE DESC, ER_NUM DESC`),
+      pool.execute(`SELECT ER_NUM AS id, TRIM(ER_REF) AS nom, ER_DATE AS date FROM FICERAY WHERE (ER_MASTER = 0 OR ER_MASTER IS NULL) AND TRIM(ER_REF) != '' ORDER BY ER_DATE DESC, ER_NUM DESC`)
     ]);
 
     context.res = {
@@ -69,7 +71,12 @@ module.exports = async function (context, req) {
         cat_web: catWebRes[0].map(r => r.val),
         sous_cat_web: sousCatWebRes[0].map(r => r.val),
         acheteurs: acheteursRes[0].map(r => r.val),
-        rayons: rayonsRes[0].map(r => ({
+        rayons_master: rayonsRes[0].map(r => ({
+          id: r.id,
+          nom: r.nom,
+          date: r.date ? new Date(r.date).toISOString().slice(0, 10) : null
+        })),
+        rayons_client: rayonsClientRes[0].map(r => ({
           id: r.id,
           nom: r.nom,
           date: r.date ? new Date(r.date).toISOString().slice(0, 10) : null
