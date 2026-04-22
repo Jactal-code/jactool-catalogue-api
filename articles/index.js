@@ -84,7 +84,8 @@ module.exports = async function (context, req) {
     cat_web: parseList(req.query.cat_web),
     sous_cat_web: parseList(req.query.sous_cat_web),
     acheteurs: parseList(req.query.acheteurs),
-    rayons: parseList(req.query.rayons).map(r => parseInt(r, 10)).filter(n => !isNaN(n)),
+    rayons_master: parseList(req.query.rayons_master).map(r => parseInt(r, 10)).filter(n => !isNaN(n)),
+    rayons_client: parseList(req.query.rayons_client).map(r => parseInt(r, 10)).filter(n => !isNaN(n)),
     stock1_op: req.query.stock1_op, stock1_val: req.query.stock1_val,
     stock2_op: req.query.stock2_op, stock2_val: req.query.stock2_val,
     stock3_op: req.query.stock3_op, stock3_val: req.query.stock3_val,
@@ -100,7 +101,7 @@ module.exports = async function (context, req) {
   );
 
   // Filtre rayons actif ? → on doit pré-filtrer avec une sous-requête sur FICDRAY
-  const needsRayonFilter = f.rayons.length > 0;
+  const needsRayonFilter = f.rayons_master.length > 0 || f.rayons_client.length > 0;
 
   // Détermine si on peut rester sur FICART (bien plus rapide)
   const canUseFicart = !search && !needsViewFilters && !needsRayonFilter && !!sortDef.ficart;
@@ -130,7 +131,7 @@ module.exports = async function (context, req) {
       // ===== CHEMIN 1b : Filtre rayons seul (pas de search, pas de filtre VIEW) =====
       // On utilise FICART + sous-requête sur FICDRAY pour filtrer par rayon
       const { where: ficartWhere, params: ficartParams } = buildFicartWhere(f);
-      const rayonClause = buildRayonSubquery(f.rayons);
+      const rayonClause = buildRayonSubquery(getAllRayonIds(f));
       const fullWhere = ficartWhere
         ? `${ficartWhere} AND ${rayonClause.sql}`
         : `WHERE ${rayonClause.sql}`;
@@ -230,7 +231,8 @@ async function searchOnFicartWithFallback(pool, search, f, sortDef, order, offse
     : `FA_PERTINANCE ${order}, FA_CODE ASC`;
 
   // Clause rayon si filtre actif
-  const rayonClause = f.rayons && f.rayons.length > 0 ? buildRayonSubquery(f.rayons) : null;
+  const allRayonIds = getAllRayonIds(f);
+  const rayonClause = allRayonIds.length > 0 ? buildRayonSubquery(allRayonIds) : null;
   const rayonSqlAdd = rayonClause ? ` AND ${rayonClause.sql}` : '';
   const rayonParamsAdd = rayonClause ? rayonClause.params : [];
 
@@ -417,8 +419,9 @@ function buildViewWhereWithFulltext(ftxQuery, f) {
   addStock(conditions, params, 'STOCK3', f.stock3_op, f.stock3_val);
 
   // Filtre rayon (sous-requête sur FICDRAY)
-  if (f.rayons && f.rayons.length > 0) {
-    const rc = buildRayonSubquery(f.rayons, 'REF_JACTAL');
+  const allRayonIds = getAllRayonIds(f);
+  if (allRayonIds.length > 0) {
+    const rc = buildRayonSubquery(allRayonIds, 'REF_JACTAL');
     conditions.push(rc.sql);
     params.push(...rc.params);
   }
@@ -455,8 +458,9 @@ function buildViewWhere(search, f) {
   addStock(conditions, params, 'STOCK3', f.stock3_op, f.stock3_val);
 
   // Filtre rayon (sous-requête sur FICDRAY)
-  if (f.rayons && f.rayons.length > 0) {
-    const rc = buildRayonSubquery(f.rayons, 'REF_JACTAL');
+  const allRayonIds = getAllRayonIds(f);
+  if (allRayonIds.length > 0) {
+    const rc = buildRayonSubquery(allRayonIds, 'REF_JACTAL');
     conditions.push(rc.sql);
     params.push(...rc.params);
   }
@@ -484,6 +488,11 @@ function addStock(conditions, params, col, op, val) {
 // =============================================================
 // RAYONS — sous-requête de filtrage (WHERE FA_CODE IN (SELECT ...))
 // =============================================================
+// Combine rayons_master + rayons_client en une seule liste d'IDs
+function getAllRayonIds(f) {
+  return [...(f.rayons_master || []), ...(f.rayons_client || [])];
+}
+
 // Construit un bloc de clause SQL du type :
 //   FA_CODE IN (
 //     SELECT TRIM(DR_ART) FROM FICDRAY
@@ -502,8 +511,10 @@ function buildRayonSubquery(rayonIds, column = 'FA_CODE') {
 }
 
 // =============================================================
-// RAYONS — récupérer les rayons MASTER des articles d'une page
-// Retourne un Map<ref, [{id, nom, date}, ...]>
+// RAYONS — récupérer les rayons des articles d'une page
+// Retourne un Map<ref, [{id, nom, date, master}, ...]>
+// - master: true = rayon MASTER (ER_MASTER = 1)
+// - master: false = rayon client / autre
 // =============================================================
 async function getRayonsForRefs(pool, refs) {
   if (!refs || refs.length === 0) return new Map();
@@ -513,12 +524,13 @@ async function getRayonsForRefs(pool, refs) {
        TRIM(D.DR_ART) AS ref,
        E.ER_NUM AS id,
        TRIM(E.ER_REF) AS nom,
-       E.ER_DATE AS date
+       E.ER_DATE AS date,
+       COALESCE(E.ER_MASTER, 0) AS master_flag
      FROM FICDRAY D
      JOIN FICERAY E ON E.ER_NUM = CAST(LEFT(D.DR_NUM, 6) AS UNSIGNED)
      WHERE TRIM(D.DR_ART) IN (${placeholders})
-       AND E.ER_MASTER = 1
-     ORDER BY E.ER_DATE DESC`,
+       AND TRIM(E.ER_REF) != ''
+     ORDER BY E.ER_MASTER DESC, E.ER_DATE DESC`,
     refs
   );
   const map = new Map();
@@ -527,7 +539,12 @@ async function getRayonsForRefs(pool, refs) {
     // Éviter les doublons (un rayon peut apparaître plusieurs fois dans FICDRAY)
     const arr = map.get(row.ref);
     if (!arr.some(x => x.id === row.id)) {
-      arr.push({ id: row.id, nom: row.nom, date: row.date });
+      arr.push({
+        id: row.id,
+        nom: row.nom,
+        date: row.date,
+        master: row.master_flag === 1
+      });
     }
   }
   return map;
