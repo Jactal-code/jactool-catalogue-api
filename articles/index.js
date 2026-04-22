@@ -84,6 +84,7 @@ module.exports = async function (context, req) {
     cat_web: parseList(req.query.cat_web),
     sous_cat_web: parseList(req.query.sous_cat_web),
     acheteurs: parseList(req.query.acheteurs),
+    rayons: parseList(req.query.rayons).map(r => parseInt(r, 10)).filter(n => !isNaN(n)),
     stock1_op: req.query.stock1_op, stock1_val: req.query.stock1_val,
     stock2_op: req.query.stock2_op, stock2_val: req.query.stock2_val,
     stock3_op: req.query.stock3_op, stock3_val: req.query.stock3_val,
@@ -98,8 +99,11 @@ module.exports = async function (context, req) {
     || f.cat_web.length || f.sous_cat_web.length
   );
 
+  // Filtre rayons actif ? → on doit pré-filtrer avec une sous-requête sur FICDRAY
+  const needsRayonFilter = f.rayons.length > 0;
+
   // Détermine si on peut rester sur FICART (bien plus rapide)
-  const canUseFicart = !search && !needsViewFilters && !!sortDef.ficart;
+  const canUseFicart = !search && !needsViewFilters && !needsRayonFilter && !!sortDef.ficart;
 
   const pool = getPool();
   try {
@@ -117,6 +121,29 @@ module.exports = async function (context, req) {
         pool.execute(
           `SELECT FA_CODE as REF_JACTAL FROM FICART ${where} ORDER BY ${orderBy} LIMIT ${pageSize} OFFSET ${offset}`,
           params
+        )
+      ]);
+      total = countRes[0][0].total;
+      refsToFetch = refRes[0].map(r => r.REF_JACTAL);
+
+    } else if (needsRayonFilter && !search && !needsViewFilters) {
+      // ===== CHEMIN 1b : Filtre rayons seul (pas de search, pas de filtre VIEW) =====
+      // On utilise FICART + sous-requête sur FICDRAY pour filtrer par rayon
+      const { where: ficartWhere, params: ficartParams } = buildFicartWhere(f);
+      const rayonClause = buildRayonSubquery(f.rayons);
+      const fullWhere = ficartWhere
+        ? `${ficartWhere} AND ${rayonClause.sql}`
+        : `WHERE ${rayonClause.sql}`;
+      const allParams = [...ficartParams, ...rayonClause.params];
+      const orderBy = sortDef.ficart
+        ? `${sortDef.ficart} ${order}, FA_CODE ASC`
+        : `FA_PERTINANCE ${order}, FA_CODE ASC`;
+
+      const [countRes, refRes] = await Promise.all([
+        pool.execute(`SELECT COUNT(*) as total FROM FICART ${fullWhere}`, allParams),
+        pool.execute(
+          `SELECT FA_CODE as REF_JACTAL FROM FICART ${fullWhere} ORDER BY ${orderBy} LIMIT ${pageSize} OFFSET ${offset}`,
+          allParams
         )
       ]);
       total = countRes[0][0].total;
@@ -152,19 +179,31 @@ module.exports = async function (context, req) {
 
     // ===== Récupération des détails pour les refs trouvées =====
     // On passe par la VIEW pour avoir tous les champs joints (fournisseur, marque, etc.)
+    // ET on lance en PARALLÈLE la récupération des rayons MASTER
     const requestedCols = (req.query.columns || '').split(',').map(c => c.trim()).filter(c => c && ALL_VIEW_COLUMNS.has(c));
     const finalCols = Array.from(new Set([...BASE_COLS, ...requestedCols]));
     const colsList = finalCols.map(c => `\`${c}\``).join(', ');
 
     const placeholders = refsToFetch.map(() => '?').join(',');
     const escapedRefs = refsToFetch.map(r => mysql.escape(r)).join(',');
-    const [rows] = await pool.query(
-      `SELECT ${colsList}
-       FROM V_ARTICLES_CATALOGUE 
-       WHERE REF_JACTAL IN (${placeholders})
-       ORDER BY FIELD(REF_JACTAL, ${escapedRefs})`,
-      refsToFetch
-    );
+
+    // Requêtes en parallèle : détails articles + rayons MASTER
+    const [detailsRes, rayonsMap] = await Promise.all([
+      pool.query(
+        `SELECT ${colsList}
+         FROM V_ARTICLES_CATALOGUE 
+         WHERE REF_JACTAL IN (${placeholders})
+         ORDER BY FIELD(REF_JACTAL, ${escapedRefs})`,
+        refsToFetch
+      ),
+      getRayonsForRefs(pool, refsToFetch)
+    ]);
+    const rows = detailsRes[0];
+
+    // Injecter les rayons dans chaque article
+    for (const row of rows) {
+      row.RAYONS = rayonsMap.get(row.REF_JACTAL) || [];
+    }
 
     context.res = {
       status: 200,
@@ -190,15 +229,20 @@ async function searchOnFicartWithFallback(pool, search, f, sortDef, order, offse
     ? `${sortDef.ficart} ${order}, FA_CODE ASC`
     : `FA_PERTINANCE ${order}, FA_CODE ASC`;
 
+  // Clause rayon si filtre actif
+  const rayonClause = f.rayons && f.rayons.length > 0 ? buildRayonSubquery(f.rayons) : null;
+  const rayonSqlAdd = rayonClause ? ` AND ${rayonClause.sql}` : '';
+  const rayonParamsAdd = rayonClause ? rayonClause.params : [];
+
   // 1) Tentative FULLTEXT (rapide)
   const ftxQuery = buildFulltextQuery(search);
   if (ftxQuery) {
     const { where, params } = buildFicartWhere(f);
     const ftxClause = `MATCH(FA_CODE, FA_LIB, FA_REFI, FA_REFF, FA_BCUS) AGAINST(? IN BOOLEAN MODE)`;
     const whereWithFtx = where
-      ? `${where} AND ${ftxClause}`
-      : `WHERE ${ftxClause}`;
-    const ftxParams = [...params, ftxQuery];
+      ? `${where} AND ${ftxClause}${rayonSqlAdd}`
+      : `WHERE ${ftxClause}${rayonSqlAdd}`;
+    const ftxParams = [...params, ftxQuery, ...rayonParamsAdd];
 
     const [countRes, refRes] = await Promise.all([
       pool.execute(`SELECT COUNT(*) as total FROM FICART ${whereWithFtx}`, ftxParams),
@@ -220,9 +264,9 @@ async function searchOnFicartWithFallback(pool, search, f, sortDef, order, offse
   const pattern = `%${search}%`;
   const likeParams = [pattern, pattern, pattern, pattern, pattern];
   const whereWithLike = where
-    ? `${where} AND ${likeClause}`
-    : `WHERE ${likeClause}`;
-  const allParams = [...params, ...likeParams];
+    ? `${where} AND ${likeClause}${rayonSqlAdd}`
+    : `WHERE ${likeClause}${rayonSqlAdd}`;
+  const allParams = [...params, ...likeParams, ...rayonParamsAdd];
 
   const [countRes, refRes] = await Promise.all([
     pool.execute(`SELECT COUNT(*) as total FROM FICART ${whereWithLike}`, allParams),
@@ -372,6 +416,13 @@ function buildViewWhereWithFulltext(ftxQuery, f) {
   addStock(conditions, params, 'STOCK2', f.stock2_op, f.stock2_val);
   addStock(conditions, params, 'STOCK3', f.stock3_op, f.stock3_val);
 
+  // Filtre rayon (sous-requête sur FICDRAY)
+  if (f.rayons && f.rayons.length > 0) {
+    const rc = buildRayonSubquery(f.rayons, 'REF_JACTAL');
+    conditions.push(rc.sql);
+    params.push(...rc.params);
+  }
+
   return { where: `WHERE ${conditions.join(' AND ')}`, params };
 }
 
@@ -403,6 +454,13 @@ function buildViewWhere(search, f) {
   addStock(conditions, params, 'STOCK2', f.stock2_op, f.stock2_val);
   addStock(conditions, params, 'STOCK3', f.stock3_op, f.stock3_val);
 
+  // Filtre rayon (sous-requête sur FICDRAY)
+  if (f.rayons && f.rayons.length > 0) {
+    const rc = buildRayonSubquery(f.rayons, 'REF_JACTAL');
+    conditions.push(rc.sql);
+    params.push(...rc.params);
+  }
+
   return { where: conditions.length ? `WHERE ${conditions.join(' AND ')}` : '', params };
 }
 
@@ -421,4 +479,56 @@ function addStock(conditions, params, col, op, val) {
   if (isNaN(numVal)) return;
   conditions.push(`${col} ${op} ?`);
   params.push(numVal);
+}
+
+// =============================================================
+// RAYONS — sous-requête de filtrage (WHERE FA_CODE IN (SELECT ...))
+// =============================================================
+// Construit un bloc de clause SQL du type :
+//   FA_CODE IN (
+//     SELECT TRIM(DR_ART) FROM FICDRAY
+//     WHERE CAST(LEFT(DR_NUM,6) AS UNSIGNED) IN (?, ?, ...)
+//     AND TRIM(DR_ART) != ''
+//   )
+// `column` = nom de colonne côté article (FA_CODE ou REF_JACTAL selon contexte)
+function buildRayonSubquery(rayonIds, column = 'FA_CODE') {
+  const placeholders = rayonIds.map(() => '?').join(',');
+  const sql = `${column} IN (
+    SELECT TRIM(DR_ART) FROM FICDRAY
+    WHERE CAST(LEFT(DR_NUM, 6) AS UNSIGNED) IN (${placeholders})
+      AND TRIM(DR_ART) != ''
+  )`;
+  return { sql, params: rayonIds };
+}
+
+// =============================================================
+// RAYONS — récupérer les rayons MASTER des articles d'une page
+// Retourne un Map<ref, [{id, nom, date}, ...]>
+// =============================================================
+async function getRayonsForRefs(pool, refs) {
+  if (!refs || refs.length === 0) return new Map();
+  const placeholders = refs.map(() => '?').join(',');
+  const [rows] = await pool.query(
+    `SELECT 
+       TRIM(D.DR_ART) AS ref,
+       E.ER_NUM AS id,
+       TRIM(E.ER_REF) AS nom,
+       E.ER_DATE AS date
+     FROM FICDRAY D
+     JOIN FICERAY E ON E.ER_NUM = CAST(LEFT(D.DR_NUM, 6) AS UNSIGNED)
+     WHERE TRIM(D.DR_ART) IN (${placeholders})
+       AND E.ER_MASTER = 1
+     ORDER BY E.ER_DATE DESC`,
+    refs
+  );
+  const map = new Map();
+  for (const row of rows) {
+    if (!map.has(row.ref)) map.set(row.ref, []);
+    // Éviter les doublons (un rayon peut apparaître plusieurs fois dans FICDRAY)
+    const arr = map.get(row.ref);
+    if (!arr.some(x => x.id === row.id)) {
+      arr.push({ id: row.id, nom: row.nom, date: row.date });
+    }
+  }
+  return map;
 }
