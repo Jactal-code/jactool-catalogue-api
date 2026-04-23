@@ -317,9 +317,11 @@ function buildWhere(search, f) {
     conditions.push(`LICENCE_NOM IN (${f.licences.map(() => '?').join(',')})`);
     params.push(...f.licences);
   }
-  if (f.actif === '1' || f.actif === '0') {
-    conditions.push(`ACTUEL = ?`);
-    params.push(f.actif === '1' ? 1 : 0);
+  // Actif: ACTUEL=1 = Oui; ACTUEL=0, 2, ou NULL = Non (convention Jactal)
+  if (f.actif === '1') {
+    conditions.push(`ACTUEL = 1`);
+  } else if (f.actif === '0') {
+    conditions.push(`(ACTUEL != 1 OR ACTUEL IS NULL)`);
   }
   if (f.statuts.length > 0) {
     conditions.push(`STATUT IN (${f.statuts.map(() => '?').join(',')})`);
