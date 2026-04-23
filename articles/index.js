@@ -358,8 +358,9 @@ function buildFicartWhere(f) {
   addIn(conditions, params, 'FA_ACHNOM', f.acheteurs);
   addIn(conditions, params, 'FA_STA', f.statuts);
 
+  // Actif: FA_ACT=1 = Oui; FA_ACT=0, 2, ou NULL = Non (convention Jactal)
   if (f.actif === '1') conditions.push(`FA_ACT = 1`);
-  else if (f.actif === '0') conditions.push(`(FA_ACT = 0 OR FA_ACT IS NULL)`);
+  else if (f.actif === '0') conditions.push(`(FA_ACT != 1 OR FA_ACT IS NULL)`);
 
   addStock(conditions, params, 'FA_STO1', f.stock1_op, f.stock1_val);
   addStock(conditions, params, 'FA_STO2', f.stock2_op, f.stock2_val);
@@ -411,8 +412,9 @@ function buildViewWhereWithFulltext(ftxQuery, f) {
   addIn(conditions, params, 'NOM_ACHETEUR', f.acheteurs);
   addIn(conditions, params, 'STATUT', f.statuts);
 
+  // Actif: ACTUEL=1 = Oui; ACTUEL=0, 2, ou NULL = Non (convention Jactal)
   if (f.actif === '1') conditions.push(`ACTUEL = 1`);
-  else if (f.actif === '0') conditions.push(`(ACTUEL = 0 OR ACTUEL IS NULL)`);
+  else if (f.actif === '0') conditions.push(`(ACTUEL != 1 OR ACTUEL IS NULL)`);
 
   addStock(conditions, params, 'STOCK1', f.stock1_op, f.stock1_val);
   addStock(conditions, params, 'STOCK2', f.stock2_op, f.stock2_val);
@@ -450,8 +452,9 @@ function buildViewWhere(search, f) {
   addIn(conditions, params, 'NOM_ACHETEUR', f.acheteurs);
   addIn(conditions, params, 'STATUT', f.statuts);
 
+  // Actif: ACTUEL=1 = Oui; ACTUEL=0, 2, ou NULL = Non (convention Jactal)
   if (f.actif === '1') conditions.push(`ACTUEL = 1`);
-  else if (f.actif === '0') conditions.push(`(ACTUEL = 0 OR ACTUEL IS NULL)`);
+  else if (f.actif === '0') conditions.push(`(ACTUEL != 1 OR ACTUEL IS NULL)`);
 
   addStock(conditions, params, 'STOCK1', f.stock1_op, f.stock1_val);
   addStock(conditions, params, 'STOCK2', f.stock2_op, f.stock2_val);
