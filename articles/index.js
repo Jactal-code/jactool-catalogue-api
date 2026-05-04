@@ -66,29 +66,52 @@ module.exports = async function (context, req) {
     return;
   }
 
-  const page = Math.max(1, parseInt(req.query.page) || 1);
-  const pageSize = Math.min(200, Math.max(1, parseInt(req.query.pageSize) || 50));
-  const search = (req.query.search || '').trim();
-  const sort = req.query.sort || 'pertinance';
-  const order = (req.query.order || 'desc').toLowerCase() === 'asc' ? 'ASC' : 'DESC';
+  // Support GET et POST (POST pour les grandes listes de refs)
+  const isPost = req.method === 'POST';
+  const queryParams = req.query || {};
+  const bodyParams = isPost && req.body ? req.body : {};
+
+  // Helper pour récupérer un paramètre depuis query OU body
+  const getParam = (name) => {
+    if (bodyParams[name] !== undefined) return bodyParams[name];
+    return queryParams[name];
+  };
+
+  const page = Math.max(1, parseInt(getParam('page')) || 1);
+  const pageSize = Math.min(200, Math.max(1, parseInt(getParam('pageSize')) || 50));
+  const search = (getParam('search') || '').trim();
+  const sort = getParam('sort') || 'pertinance';
+  const order = (getParam('order') || 'desc').toLowerCase() === 'asc' ? 'ASC' : 'DESC';
   const offset = (page - 1) * pageSize;
 
+  // Mode "liste" : l'utilisateur a collé une liste d'identifiants
+  // refs_list et eans_list peuvent être en query (CSV) OU en body (array)
+  function parseListFlexible(value) {
+    if (!value) return [];
+    if (Array.isArray(value)) return value.map(s => String(s).trim()).filter(s => s.length > 0);
+    return String(value).split(/[\s,;]+/).map(s => s.trim()).filter(s => s.length > 0);
+  }
+
+  const refsList = parseListFlexible(getParam('refs_list'));
+  const eansList = parseListFlexible(getParam('eans_list'));
+  const isListMode = refsList.length > 0 || eansList.length > 0;
+
   const f = {
-    fournisseurs: parseList(req.query.fournisseurs),
-    marques: parseList(req.query.marques),
-    licences: parseList(req.query.licences),
-    actif: req.query.actif,
-    statuts: parseList(req.query.statuts),
-    cat_trad: parseList(req.query.cat_trad),
-    sous_cat_trad: parseList(req.query.sous_cat_trad),
-    cat_web: parseList(req.query.cat_web),
-    sous_cat_web: parseList(req.query.sous_cat_web),
-    acheteurs: parseList(req.query.acheteurs),
-    rayons_master: parseList(req.query.rayons_master).map(r => parseInt(r, 10)).filter(n => !isNaN(n)),
-    rayons_client: parseList(req.query.rayons_client).map(r => parseInt(r, 10)).filter(n => !isNaN(n)),
-    stock1_op: req.query.stock1_op, stock1_val: req.query.stock1_val,
-    stock2_op: req.query.stock2_op, stock2_val: req.query.stock2_val,
-    stock3_op: req.query.stock3_op, stock3_val: req.query.stock3_val,
+    fournisseurs: parseList(getParam('fournisseurs')),
+    marques: parseList(getParam('marques')),
+    licences: parseList(getParam('licences')),
+    actif: getParam('actif'),
+    statuts: parseList(getParam('statuts')),
+    cat_trad: parseList(getParam('cat_trad')),
+    sous_cat_trad: parseList(getParam('sous_cat_trad')),
+    cat_web: parseList(getParam('cat_web')),
+    sous_cat_web: parseList(getParam('sous_cat_web')),
+    acheteurs: parseList(getParam('acheteurs')),
+    rayons_master: parseList(getParam('rayons_master')).map(r => parseInt(r, 10)).filter(n => !isNaN(n)),
+    rayons_client: parseList(getParam('rayons_client')).map(r => parseInt(r, 10)).filter(n => !isNaN(n)),
+    stock1_op: getParam('stock1_op'), stock1_val: getParam('stock1_val'),
+    stock2_op: getParam('stock2_op'), stock2_val: getParam('stock2_val'),
+    stock3_op: getParam('stock3_op'), stock3_val: getParam('stock3_val'),
   };
 
   const sortDef = SORT_MAP[sort] || SORT_MAP['pertinance'];
@@ -110,8 +133,22 @@ module.exports = async function (context, req) {
   try {
     let total = 0;
     let refsToFetch = [];
+    // Pour le mode liste : on track aussi les ids "manquants" (pas trouvés dans FICART)
+    let listMode_notFound = null;
+    // Pour préserver l'ordre de la liste collée
+    let listMode_orderedRefs = null;
 
-    if (canUseFicart) {
+    if (isListMode) {
+      // ===== MODE LISTE : recherche par identifiants explicites collés par l'utilisateur =====
+      // Court-circuite tous les filtres et la pagination habituelle
+      const result = await searchByExplicitList(pool, refsList, eansList);
+      total = result.foundRefs.length;
+      // Pagination côté JS sur la liste résolue
+      refsToFetch = result.foundRefs.slice(offset, offset + pageSize);
+      listMode_orderedRefs = result.foundRefs;
+      listMode_notFound = result.notFound;
+
+    } else if (canUseFicart) {
       // ===== CHEMIN 1 : FICART direct, filtres simples seulement =====
       const { where, params } = buildFicartWhere(f);
       const orderBy = `${sortDef.ficart} ${order}, FA_CODE ASC`;
@@ -172,7 +209,12 @@ module.exports = async function (context, req) {
         body: {
           articles: [], total, page, pageSize,
           totalPages: Math.ceil(total / pageSize),
-          sort, order: order.toLowerCase()
+          sort, order: order.toLowerCase(),
+          ...(isListMode ? {
+            list_mode: true,
+            list_not_found: listMode_notFound || [],
+            list_total_requested: refsList.length + eansList.length
+          } : {})
         }
       };
       return;
@@ -181,7 +223,7 @@ module.exports = async function (context, req) {
     // ===== Récupération des détails pour les refs trouvées =====
     // On passe par la VIEW pour avoir tous les champs joints (fournisseur, marque, etc.)
     // ET on lance en PARALLÈLE la récupération des rayons MASTER
-    const requestedCols = (req.query.columns || '').split(',').map(c => c.trim()).filter(c => c && ALL_VIEW_COLUMNS.has(c));
+    const requestedCols = (getParam('columns') || '').split(',').map(c => c.trim()).filter(c => c && ALL_VIEW_COLUMNS.has(c));
     const finalCols = Array.from(new Set([...BASE_COLS, ...requestedCols]));
     const colsList = finalCols.map(c => `\`${c}\``).join(', ');
 
@@ -213,7 +255,13 @@ module.exports = async function (context, req) {
         articles: rows,
         total, page, pageSize,
         totalPages: Math.ceil(total / pageSize),
-        sort, order: order.toLowerCase()
+        sort, order: order.toLowerCase(),
+        // En mode liste : ajouter les IDs introuvables et indiquer le mode
+        ...(isListMode ? {
+          list_mode: true,
+          list_not_found: listMode_notFound || [],
+          list_total_requested: refsList.length + eansList.length
+        } : {})
       }
     };
   } catch (err) {
@@ -486,6 +534,64 @@ function addStock(conditions, params, col, op, val) {
   if (isNaN(numVal)) return;
   conditions.push(`${col} ${op} ?`);
   params.push(numVal);
+}
+
+// =============================================================
+// MODE LISTE — Recherche par liste explicite de REF / EAN
+// =============================================================
+// Retourne :
+//   - foundRefs : liste des FA_CODE trouvés, dans l'ordre de la liste collée
+//   - notFound : liste des identifiants non trouvés, avec le type
+async function searchByExplicitList(pool, refsList, eansList) {
+  const foundRefs = [];
+  const seenRefs = new Set();
+  const notFound = [];
+
+  // 1) Recherche par REF_JACTAL (FA_CODE direct)
+  if (refsList.length > 0) {
+    const placeholders = refsList.map(() => '?').join(',');
+    const [rows] = await pool.query(
+      `SELECT FA_CODE FROM FICART WHERE FA_CODE IN (${placeholders})`,
+      refsList
+    );
+    const foundSet = new Set(rows.map(r => r.FA_CODE));
+    // Préserver l'ordre de la liste collée
+    for (const ref of refsList) {
+      if (foundSet.has(ref) && !seenRefs.has(ref)) {
+        foundRefs.push(ref);
+        seenRefs.add(ref);
+      } else if (!foundSet.has(ref)) {
+        notFound.push({ id: ref, type: 'REF' });
+      }
+    }
+  }
+
+  // 2) Recherche par EAN (FA_BCUS = EAN_USINE) → on récupère le FA_CODE correspondant
+  if (eansList.length > 0) {
+    const placeholders = eansList.map(() => '?').join(',');
+    const [rows] = await pool.query(
+      `SELECT FA_CODE, FA_BCUS FROM FICART WHERE FA_BCUS IN (${placeholders})`,
+      eansList
+    );
+    // Map EAN → FA_CODE (premier match)
+    const eanToCode = new Map();
+    for (const row of rows) {
+      if (!eanToCode.has(row.FA_BCUS)) {
+        eanToCode.set(row.FA_BCUS, row.FA_CODE);
+      }
+    }
+    for (const ean of eansList) {
+      const code = eanToCode.get(ean);
+      if (code && !seenRefs.has(code)) {
+        foundRefs.push(code);
+        seenRefs.add(code);
+      } else if (!code) {
+        notFound.push({ id: ean, type: 'EAN' });
+      }
+    }
+  }
+
+  return { foundRefs, notFound };
 }
 
 // =============================================================
